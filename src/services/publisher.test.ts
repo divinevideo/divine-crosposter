@@ -188,6 +188,35 @@ describe('publisher service', () => {
     })
   })
 
+  it('keeps processing jobs in poll mode after transient poll failures', async () => {
+    await seedConnectedJob(db, 'tiktok', {
+      status: 'processing',
+      externalPostId: 'publish-id',
+      nextRetryAt: 2_000,
+    })
+    fetchMock.mockResolvedValueOnce(Response.json({ error: { message: 'slow down' } }, { status: 429 }))
+
+    await expect(processCrosspostJob(platformEnv(db, 'tiktok'), 'job_1', { now: 2_000 })).rejects.toBeInstanceOf(
+      PublisherRetryError,
+    )
+    await expect(getJob(db, 'job_1', PUBKEY_A)).resolves.toMatchObject({
+      status: 'processing',
+      retryCount: 1,
+      errorCode: 'processing_timeout',
+      nextRetryAt: 2_060,
+    })
+
+    fetchMock.mockResolvedValueOnce(
+      Response.json({ data: { status: 'PUBLISH_COMPLETE', publish_id: 'publish-id' }, error: { code: 'ok' } }),
+    )
+    await expect(processCrosspostJob(platformEnv(db, 'tiktok'), 'job_1', { now: 2_060 })).resolves.toEqual({
+      status: 'posted',
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(String(fetchMock.mock.calls[1][0])).toBe('https://open.tiktokapis.com/v2/post/publish/status/fetch/')
+  })
+
   it('sanitizes refreshed token metadata before storing connection metadata', async () => {
     await upsertConnection(
       db,

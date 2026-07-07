@@ -291,6 +291,52 @@ async function handleProviderError(env: Env, job: JobRecord, error: PlatformAdap
   throw new PublisherRetryError(delay)
 }
 
+async function handleProcessingProviderError(
+  env: Env,
+  job: JobRecord,
+  error: PlatformAdapterError,
+  now: number,
+): Promise<ProcessCrosspostResult> {
+  await addAttempt(env, {
+    jobId: job.id,
+    status: error.code === 'needs_reauth' ? 'needs_reauth' : 'processing',
+    errorCode: error.code,
+    errorMessage: error.message,
+    providerStatus: error.providerStatus ?? null,
+    providerResponse: error.providerResponse,
+    now,
+  })
+
+  if (error.code === 'needs_reauth') {
+    await markConnectionNeedsReauth(env.DB, job.connectionId, now)
+    await updateJobStatus(env.DB, {
+      id: job.id,
+      status: 'needs_reauth',
+      updatedAt: now,
+      errorCode: 'needs_reauth',
+      errorMessage: error.message,
+      nextRetryAt: null,
+    })
+    return { status: 'needs_reauth' }
+  }
+
+  if (!retryableCode(error.code)) {
+    await updateJobStatus(env.DB, {
+      id: job.id,
+      status: 'failed',
+      updatedAt: now,
+      errorCode: error.code,
+      errorMessage: error.message,
+      nextRetryAt: null,
+    })
+    return { status: 'failed' }
+  }
+
+  const delay = await scheduleRetry(env, job, 'processing_timeout', error.message, now)
+  if (delay === null) return { status: 'failed' }
+  throw new PublisherRetryError(delay)
+}
+
 export async function processCrosspostJob(env: Env, jobId: string, options: { now?: number } = {}): Promise<ProcessCrosspostResult> {
   const now = options.now ?? nowSeconds()
   const existing = await getJob(env.DB, jobId)
@@ -332,7 +378,8 @@ export async function processCrosspostJob(env: Env, jobId: string, options: { no
     const accessToken = await accessTokenForJob(env, job, now)
     if (!accessToken) return { status: 'needs_reauth' }
 
-    if (existing.status === 'processing') {
+    const isProcessingPoll = existing.status === 'processing'
+    if (isProcessingPoll) {
       if (!adapter.pollPublishStatus) {
         const delay = await scheduleRetry(env, job, 'processing_timeout', 'platform publish is still processing', now)
         return delay === null ? { status: 'failed' } : { status: 'processing', retryDelaySeconds: delay }
@@ -355,9 +402,13 @@ export async function processCrosspostJob(env: Env, jobId: string, options: { no
     return markResult(env, job, result, now)
   } catch (error) {
     if (error instanceof PlatformAdapterError) {
-      return handleProviderError(env, job, error, now)
+      return existing.status === 'processing'
+        ? handleProcessingProviderError(env, job, error, now)
+        : handleProviderError(env, job, error, now)
     }
     const platformError = new PlatformAdapterError(job.platform, 'unknown_platform_error', 'publisher failed')
-    return handleProviderError(env, job, platformError, now)
+    return existing.status === 'processing'
+      ? handleProcessingProviderError(env, job, platformError, now)
+      : handleProviderError(env, job, platformError, now)
   }
 }

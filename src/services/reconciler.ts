@@ -43,6 +43,11 @@ function newestEventTimestamp(events: DivineVideoEvent[], fallback: number): num
   return events.reduce((latest, event) => Math.max(latest, event.created_at), 0)
 }
 
+function nextLastCheckedAt(events: DivineVideoEvent[], previous: number | null, now: number): number {
+  const inspectedAt = newestEventTimestamp(events, previous ?? now)
+  return Math.max(previous ?? 0, inspectedAt)
+}
+
 export async function runAutoCrosspostReconciliation(
   env: Env,
   options: { now?: number } = {},
@@ -92,7 +97,7 @@ export async function runAutoCrosspostReconciliation(
       await upsertCursor(env.DB, {
         pubkey,
         cursor: recent.nextCursor ?? cursor?.cursor ?? null,
-        lastCheckedAt: newestEventTimestamp(recent.events, now),
+        lastCheckedAt: nextLastCheckedAt(recent.events, cursor?.lastCheckedAt ?? null, now),
         updatedAt: now,
       })
     }

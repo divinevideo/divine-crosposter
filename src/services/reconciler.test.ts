@@ -140,6 +140,21 @@ describe('automatic crosspost reconciler', () => {
     await expect(listJobsForVideo(db, PUBKEY_A, VIDEO_EVENT_ID_2)).resolves.toHaveLength(1)
   })
 
+  it('does not move last_checked_at backwards when no cursor is available', async () => {
+    await seedPreference(db, { mode: 'automatic' })
+    await upsertCursor(db, { pubkey: PUBKEY_A, cursor: null, lastCheckedAt: 3_000, updatedAt: 3_000 })
+    mockRecentAndHydrate(fetchMock, [event(VIDEO_EVENT_ID, 2_500)], null)
+
+    const result = await runAutoCrosspostReconciliation(env(db, queueSend), { now: 3_300 })
+
+    expect(result).toMatchObject({ eventsChecked: 0, jobsCreatedOrFound: 0 })
+    await expect(getCursor(db, PUBKEY_A)).resolves.toMatchObject({
+      cursor: null,
+      lastCheckedAt: 3_000,
+      updatedAt: 3_300,
+    })
+  })
+
   it('does not advance cursor when Funnelcake fails', async () => {
     await seedPreference(db, { mode: 'automatic' })
     await upsertCursor(db, { pubkey: PUBKEY_A, cursor: 'cursor-old', lastCheckedAt: 1_000, updatedAt: 1_000 })
