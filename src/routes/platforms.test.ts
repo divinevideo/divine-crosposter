@@ -15,14 +15,46 @@ function env(overrides: Partial<Env> = {}): Env {
 }
 
 describe('platforms route', () => {
-  it('returns all provider summaries with enabled status from env', async () => {
-    const res = await app.request('/platforms', {}, env({
-      ENABLE_TIKTOK: 'true',
-      TIKTOK_CLIENT_KEY: 'tiktok-client',
-      TIKTOK_CLIENT_SECRET: 'tiktok-secret',
-    }))
+  it('returns a branded provider status page by default', async () => {
+    const res = await app.request(
+      '/platforms',
+      {
+        headers: { accept: 'text/html' },
+      },
+      env({
+        ENABLE_TIKTOK: 'true',
+        TIKTOK_CLIENT_KEY: 'tiktok-client',
+        TIKTOK_CLIENT_SECRET: 'tiktok-secret',
+      }),
+    )
 
     expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toContain('text/html')
+    const html = await res.text()
+    expect(html).toContain('<title>Divine Crossposter Platforms</title>')
+    expect(html).toContain('di<span>V</span>ine Crossposter')
+    expect(html).toContain('Provider status')
+    expect(html).toContain('TikTok')
+    expect(html).toContain('Ready')
+    expect(html).toContain('Waiting on keys')
+    expect(html).toContain('Back to setup')
+  })
+
+  it('returns all provider summaries as JSON when requested', async () => {
+    const res = await app.request(
+      '/platforms',
+      {
+        headers: { accept: 'application/json' },
+      },
+      env({
+        ENABLE_TIKTOK: 'true',
+        TIKTOK_CLIENT_KEY: 'tiktok-client',
+        TIKTOK_CLIENT_SECRET: 'tiktok-secret',
+      }),
+    )
+
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toContain('application/json')
     await expect(res.json()).resolves.toEqual({
       platforms: [
         { platform: 'instagram', enabled: false, supportsAutomatic: true },
@@ -31,5 +63,12 @@ describe('platforms route', () => {
         { platform: 'youtube', enabled: false, supportsAutomatic: true },
       ],
     })
+  })
+
+  it('returns JSON for format=json', async () => {
+    const res = await app.request('/platforms?format=json', {}, env())
+
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toContain('application/json')
   })
 })
