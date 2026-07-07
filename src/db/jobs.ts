@@ -156,6 +156,42 @@ export async function updateJobStatus(db: D1Database, input: UpdateJobStatusInpu
   await runPrepared(db, `UPDATE jobs SET ${assignments.join(', ')} WHERE id = ?`, ...bindings)
 }
 
+export async function claimJobForPublish(db: D1Database, id: string, now: number): Promise<JobRecord | null> {
+  const row = await firstPrepared<JobRow>(
+    db,
+    `UPDATE jobs
+    SET status = 'uploading', updated_at = ?, error_code = NULL, error_message = NULL
+    WHERE id = ?
+      AND status IN ('queued', 'failed')
+      AND expires_at > ?
+      AND (next_retry_at IS NULL OR next_retry_at <= ?)
+    RETURNING *`,
+    now,
+    id,
+    now,
+    now,
+  )
+  return row ? mapJob(row) : null
+}
+
+export async function claimJobForStatusPoll(db: D1Database, id: string, now: number): Promise<JobRecord | null> {
+  const row = await firstPrepared<JobRow>(
+    db,
+    `UPDATE jobs
+    SET status = 'uploading', updated_at = ?, error_code = NULL, error_message = NULL
+    WHERE id = ?
+      AND status = 'processing'
+      AND expires_at > ?
+      AND (next_retry_at IS NULL OR next_retry_at <= ?)
+    RETURNING *`,
+    now,
+    id,
+    now,
+    now,
+  )
+  return row ? mapJob(row) : null
+}
+
 export async function listRunnableJobs(db: D1Database, now: number, limit: number): Promise<JobRecord[]> {
   const rows = await allPrepared<JobRow>(
     db,

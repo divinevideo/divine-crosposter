@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { getCursor, upsertCursor } from '../db/cursors'
 import { upsertConnection } from '../db/connections'
-import { listJobsForVideo } from '../db/jobs'
+import { createOrGetJob, listJobsForVideo } from '../db/jobs'
 import { setPreference } from '../db/preferences'
-import { applyMigrations, connection, PUBKEY_A, VIDEO_EVENT_ID } from '../db/test-helpers'
+import { applyMigrations, connection, job, PUBKEY_A, VIDEO_EVENT_ID } from '../db/test-helpers'
 import type { Env, Platform, PreferenceMode } from '../types'
 import { runAutoCrosspostReconciliation } from './reconciler'
 
@@ -49,13 +49,17 @@ async function seedPreference(db: D1Database, input: { mode: PreferenceMode; pla
   })
 }
 
-function mockRecentAndHydrate(fetchMock: ReturnType<typeof vi.fn>, events: ReturnType<typeof event>[], nextCursor = 'cursor-2') {
+function mockRecentAndHydrate(
+  fetchMock: ReturnType<typeof vi.fn>,
+  events: ReturnType<typeof event>[],
+  nextCursor: string | null = 'cursor-2',
+) {
   fetchMock.mockImplementation((url: string) => {
     if (url.startsWith(`https://api.divine.video/api/v2/users/${PUBKEY_A}/videos`)) {
       return Promise.resolve(
         Response.json({
           videos: events.map((candidate) => ({ event_id: candidate.id })),
-          next_cursor: nextCursor,
+          ...(nextCursor === null ? {} : { next_cursor: nextCursor }),
         }),
       )
     }
@@ -85,7 +89,7 @@ describe('automatic crosspost reconciler', () => {
 
     const result = await runAutoCrosspostReconciliation(env(db, queueSend), { now: 3_000 })
 
-    expect(result).toMatchObject({ usersChecked: 1, eventsChecked: 1, jobsCreatedOrFound: 1 })
+    expect(result).toMatchObject({ usersChecked: 1, eventsChecked: 1, jobsCreatedOrFound: 1, queuedJobsEnqueued: 0 })
     expect(queueSend).toHaveBeenCalledTimes(1)
     await expect(listJobsForVideo(db, PUBKEY_A, VIDEO_EVENT_ID)).resolves.toHaveLength(1)
   })
@@ -97,7 +101,7 @@ describe('automatic crosspost reconciler', () => {
     await runAutoCrosspostReconciliation(env(db, queueSend), { now: 3_000 })
     await runAutoCrosspostReconciliation(env(db, queueSend), { now: 3_300 })
 
-    expect(queueSend).toHaveBeenCalledTimes(1)
+    expect(queueSend).toHaveBeenCalledTimes(2)
     await expect(listJobsForVideo(db, PUBKEY_A, VIDEO_EVENT_ID)).resolves.toHaveLength(1)
   })
 
@@ -106,7 +110,7 @@ describe('automatic crosspost reconciler', () => {
 
     const result = await runAutoCrosspostReconciliation(env(db, queueSend), { now: 3_000 })
 
-    expect(result).toEqual({ usersChecked: 0, eventsChecked: 0, jobsCreatedOrFound: 0 })
+    expect(result).toEqual({ usersChecked: 0, eventsChecked: 0, jobsCreatedOrFound: 0, queuedJobsEnqueued: 0 })
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
@@ -122,6 +126,18 @@ describe('automatic crosspost reconciler', () => {
       lastCheckedAt: 2_500,
       updatedAt: 3_000,
     })
+  })
+
+  it('uses last_checked_at to skip previously inspected videos when no cursor is available', async () => {
+    await seedPreference(db, { mode: 'automatic' })
+    await upsertCursor(db, { pubkey: PUBKEY_A, cursor: null, lastCheckedAt: 2_000, updatedAt: 2_000 })
+    mockRecentAndHydrate(fetchMock, [event(VIDEO_EVENT_ID, 1_900), event(VIDEO_EVENT_ID_2, 2_500)], null)
+
+    const result = await runAutoCrosspostReconciliation(env(db, queueSend), { now: 3_000 })
+
+    expect(result).toMatchObject({ eventsChecked: 1, jobsCreatedOrFound: 1 })
+    await expect(listJobsForVideo(db, PUBKEY_A, VIDEO_EVENT_ID)).resolves.toHaveLength(0)
+    await expect(listJobsForVideo(db, PUBKEY_A, VIDEO_EVENT_ID_2)).resolves.toHaveLength(1)
   })
 
   it('does not advance cursor when Funnelcake fails', async () => {
@@ -140,5 +156,15 @@ describe('automatic crosspost reconciler', () => {
       updatedAt: 1_000,
     })
     expect(queueSend).not.toHaveBeenCalled()
+  })
+
+  it('re-enqueues runnable queued jobs as an outbox recovery path', async () => {
+    await upsertConnection(db, connection({ id: 'conn_tiktok' }))
+    await createOrGetJob(db, job({ id: 'job_stranded', connectionId: 'conn_tiktok', nextRetryAt: null }))
+
+    const result = await runAutoCrosspostReconciliation(env(db, queueSend), { now: 3_000 })
+
+    expect(result).toMatchObject({ queuedJobsEnqueued: 1 })
+    expect(queueSend).toHaveBeenCalledWith({ jobId: 'job_stranded' })
   })
 })

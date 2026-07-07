@@ -13,6 +13,7 @@ import { getAdapter } from '../platforms/registry'
 import type { ConnectionRecord, Env, Platform, PreferenceMode, PreferenceRecord } from '../types'
 import { decryptToken, encryptToken, generatePKCE, generateRandomId } from '../utils/crypto'
 import { HttpError } from '../utils/http'
+import { sanitizeProviderMetadata } from '../utils/provider-metadata'
 import { assertAllowedReturnUrl, parsePlatform, parsePreferenceMode } from '../utils/validation'
 
 const OAUTH_STATE_TTL_SECONDS = 10 * 60
@@ -28,7 +29,6 @@ type ConnectionSummary = {
   createdAt: number
   updatedAt: number
   lastRefreshAt: number | null
-  metadataJson: string
 }
 
 type PreferenceSummary = {
@@ -60,7 +60,6 @@ function connectionSummary(connection: ConnectionRecord): ConnectionSummary {
     createdAt: connection.createdAt,
     updatedAt: connection.updatedAt,
     lastRefreshAt: connection.lastRefreshAt,
-    metadataJson: connection.metadataJson,
   }
 }
 
@@ -86,7 +85,7 @@ function redirectBase(env: Env): string {
   return loadConfig(env).oauthRedirectBase
 }
 
-async function defaultManualPreferenceIfMissing(
+async function setManualPreferenceAfterConnect(
   db: D1Database,
   pubkey: string,
   platform: Platform,
@@ -94,7 +93,8 @@ async function defaultManualPreferenceIfMissing(
   now: number,
 ): Promise<void> {
   const preferences = await getPreferences(db, pubkey)
-  if (preferences.some((preference) => preference.platform === platform)) {
+  const existing = preferences.find((preference) => preference.platform === platform)
+  if (existing?.mode === 'manual' || existing?.mode === 'automatic') {
     return
   }
 
@@ -104,7 +104,7 @@ async function defaultManualPreferenceIfMissing(
     connectionId,
     mode: 'manual',
     automaticEnabledAt: null,
-    createdAt: now,
+    createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   })
 }
@@ -132,18 +132,6 @@ async function disablePreferenceForConnection(
     createdAt: preference.createdAt,
     updatedAt: now,
   })
-}
-
-function sanitizeMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
-  const sanitized: Record<string, unknown> = {}
-  for (const [key, value] of Object.entries(metadata)) {
-    const normalized = key.toLowerCase()
-    if (normalized.includes('token') || normalized === 'code') {
-      continue
-    }
-    sanitized[key] = value
-  }
-  return sanitized
 }
 
 export async function startConnection(
@@ -241,12 +229,12 @@ export async function completeConnectionCallback(
       updatedAt: now,
       lastRefreshAt: null,
       metadataJson: JSON.stringify({
-        account: account.metadata,
-        token: sanitizeMetadata(tokens.metadata),
+        account: sanitizeProviderMetadata(account.metadata),
+        token: sanitizeProviderMetadata(tokens.metadata),
       }),
     })
 
-    await defaultManualPreferenceIfMissing(env.DB, state.pubkey, platform, connection.id, now)
+    await setManualPreferenceAfterConnect(env.DB, state.pubkey, platform, connection.id, now)
     return redirectWithResult(state.returnUrl, platform, 'connected')
   } catch {
     return failureRedirect

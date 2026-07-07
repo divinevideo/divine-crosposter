@@ -6,6 +6,7 @@ export type YouTubePrivacyStatus = 'private' | 'public' | 'unlisted'
 export const AUTO_RECONCILE_USER_BATCH_SIZE = 100
 export const AUTO_RECONCILE_MAX_USERS_PER_RUN = 500
 export const AUTO_RECONCILE_VIDEO_LIMIT_PER_USER = 25
+export const AUTO_RECONCILE_QUEUED_JOB_LIMIT = 100
 
 export type AppConfig = {
   keycastUrl: string

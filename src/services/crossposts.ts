@@ -27,7 +27,15 @@ type SourceSnapshot = {
 }
 
 const VIDEO_KIND = 34236
-const JOB_EXPIRATION_SECONDS = 7 * 24 * 60 * 60
+const JOB_EXPIRATION_SECONDS = 48 * 60 * 60
+const ALLOWED_MEDIA_HOSTS = new Set([
+  'media.divine.video',
+  'cdn.divine.video',
+  'blossom.divine.video',
+  'media.dvines.org',
+  'cdn.dvines.org',
+  'blossom.dvines.org',
+])
 
 function ensureEventId(value: string): string {
   if (!isValidEventId(value)) {
@@ -51,6 +59,14 @@ function imetaValue(tags: string[][], name: string): string | null {
         return tag[index + 1]
       }
     }
+    for (const entry of tag.slice(1)) {
+      const separator = entry.indexOf(' ')
+      if (separator === -1) continue
+      if (entry.slice(0, separator) === name) {
+        const value = entry.slice(separator + 1).trim()
+        if (value) return value
+      }
+    }
   }
   return null
 }
@@ -60,7 +76,8 @@ function isUsableMediaUrl(value: string | null): value is string {
     return false
   }
   try {
-    return new URL(value).protocol === 'https:'
+    const url = new URL(value)
+    return url.protocol === 'https:' && ALLOWED_MEDIA_HOSTS.has(url.hostname.toLowerCase())
   } catch {
     return false
   }

@@ -1,10 +1,11 @@
 import { listAttempts, recordAttempt } from '../db/attempts'
 import { getConnection, markConnectionNeedsReauth, upsertConnection } from '../db/connections'
-import { getJob, updateJobStatus } from '../db/jobs'
+import { claimJobForPublish, claimJobForStatusPoll, getJob, updateJobStatus } from '../db/jobs'
 import { getAdapter } from '../platforms/registry'
 import { PlatformAdapterError, asRecord } from '../platforms/adapter'
 import type { Env, ErrorCode, JobAttemptRecord, JobRecord, JobStatus } from '../types'
 import { decryptToken, encryptToken, generateRandomId } from '../utils/crypto'
+import { sanitizeProviderMetadata } from '../utils/provider-metadata'
 
 const BACKOFF_SECONDS = [60, 300, 900, 1800, 3600] as const
 const MAX_RETRY_COUNT = BACKOFF_SECONDS.length
@@ -111,7 +112,10 @@ async function accessTokenForJob(env: Env, job: JobRecord, now: number): Promise
       grantedScopes: refreshed.scopes.length ? refreshed.scopes.join(' ') : connection.grantedScopes,
       lastRefreshAt: now,
       updatedAt: now,
-      metadataJson: safeJson({ ...asRecord(JSON.parse(connection.metadataJson || '{}')), token: refreshed.metadata }),
+      metadataJson: safeJson({
+        ...asRecord(JSON.parse(connection.metadataJson || '{}')),
+        token: sanitizeProviderMetadata(refreshed.metadata),
+      }),
     })
     return refreshed.accessToken
   } catch (error) {
@@ -201,6 +205,7 @@ async function markResult(
     providerResponse: Record<string, unknown>
   },
   now: number,
+  countProcessingRetry = false,
 ): Promise<ProcessCrosspostResult> {
   await addAttempt(env, {
     jobId: job.id,
@@ -221,6 +226,14 @@ async function markResult(
       nextRetryAt: null,
     })
     return { status: 'posted' }
+  }
+
+  if (countProcessingRetry) {
+    const delay = await scheduleRetry(env, job, 'processing_timeout', 'platform publish is still processing', now)
+    if (delay === null) {
+      return { status: 'failed' }
+    }
+    return { status: 'processing', retryDelaySeconds: delay }
   }
 
   const delay = backoffSeconds(job.retryCount)
@@ -280,12 +293,12 @@ async function handleProviderError(env: Env, job: JobRecord, error: PlatformAdap
 
 export async function processCrosspostJob(env: Env, jobId: string, options: { now?: number } = {}): Promise<ProcessCrosspostResult> {
   const now = options.now ?? nowSeconds()
-  const job = await getJob(env.DB, jobId)
-  if (!job) return { status: 'not_found' }
+  const existing = await getJob(env.DB, jobId)
+  if (!existing) return { status: 'not_found' }
 
-  if (job.expiresAt <= now) {
+  if (existing.expiresAt <= now) {
     await updateJobStatus(env.DB, {
-      id: job.id,
+      id: existing.id,
       status: 'skipped',
       updatedAt: now,
       errorCode: 'expired',
@@ -295,10 +308,10 @@ export async function processCrosspostJob(env: Env, jobId: string, options: { no
     return { status: 'skipped' }
   }
 
-  const adapter = getAdapter(env, job.platform)
+  const adapter = getAdapter(env, existing.platform)
   if (!adapter) {
     await updateJobStatus(env.DB, {
-      id: job.id,
+      id: existing.id,
       status: 'failed',
       updatedAt: now,
       errorCode: 'not_connected',
@@ -307,11 +320,19 @@ export async function processCrosspostJob(env: Env, jobId: string, options: { no
     return { status: 'failed' }
   }
 
-  const accessToken = await accessTokenForJob(env, job, now)
-  if (!accessToken) return { status: 'needs_reauth' }
+  const job =
+    existing.status === 'processing'
+      ? await claimJobForStatusPoll(env.DB, existing.id, now)
+      : await claimJobForPublish(env.DB, existing.id, now)
+  if (!job) {
+    return { status: existing.status }
+  }
 
   try {
-    if (job.status === 'processing') {
+    const accessToken = await accessTokenForJob(env, job, now)
+    if (!accessToken) return { status: 'needs_reauth' }
+
+    if (existing.status === 'processing') {
       if (!adapter.pollPublishStatus) {
         const delay = await scheduleRetry(env, job, 'processing_timeout', 'platform publish is still processing', now)
         return delay === null ? { status: 'failed' } : { status: 'processing', retryDelaySeconds: delay }
@@ -321,10 +342,9 @@ export async function processCrosspostJob(env: Env, jobId: string, options: { no
         accessToken,
         providerResponse: pollProviderResponse(job, attempts),
       })
-      return markResult(env, job, result, now)
+      return markResult(env, job, result, now, true)
     }
 
-    await updateJobStatus(env.DB, { id: job.id, status: 'uploading', updatedAt: now, errorCode: null, errorMessage: null })
     const result = await adapter.publishVideo({
       accessToken,
       videoUrl: job.sourceMediaUrl,

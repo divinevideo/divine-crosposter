@@ -33,6 +33,7 @@ export function createYouTubeAdapter(config: YouTubeConfig): PlatformAdapter {
       url.searchParams.set('state', state)
       url.searchParams.set('response_type', 'code')
       url.searchParams.set('access_type', 'offline')
+      url.searchParams.set('prompt', 'consent')
       url.searchParams.set('scope', SCOPES.join(' '))
       if (codeChallenge) {
         url.searchParams.set('code_challenge', codeChallenge)

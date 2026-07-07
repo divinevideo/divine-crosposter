@@ -20,6 +20,13 @@ function event(overrides: Record<string, unknown> = {}) {
   }
 }
 
+function nip71Event(overrides: Record<string, unknown> = {}) {
+  return event({
+    tags: [['imeta', 'url https://media.divine.video/video.mp4', 'm video/mp4', 'x abc123']],
+    ...overrides,
+  })
+}
+
 function testEnv(db: D1Database, queueSend: ReturnType<typeof vi.fn>): Env {
   return {
     DB: db,
@@ -86,9 +93,41 @@ describe('crosspost service', () => {
       caption: 'six seconds of weird human internet',
       status: 'queued',
     })
+    expect(result.jobs[0].expiresAt - result.jobs[0].createdAt).toBe(48 * 60 * 60)
     expect(queueSend).toHaveBeenCalledTimes(2)
     expect(queueSend).toHaveBeenNthCalledWith(1, { jobId: result.jobs[0].id })
     expect(queueSend).toHaveBeenNthCalledWith(2, { jobId: result.jobs[1].id })
+  })
+
+  it('accepts real NIP-71 imeta entries for Divine media URLs and hashes', async () => {
+    await addConnectedPlatform(db, 'tiktok', 'conn_tiktok')
+    fetchMock.mockResolvedValueOnce(Response.json({ event: nip71Event() }))
+
+    const result = await createManualCrossposts(testEnv(db, queueSend), {
+      pubkey: PUBKEY_A,
+      eventId: VIDEO_EVENT_ID,
+      platforms: ['tiktok'],
+    })
+
+    expect(result.jobs[0]).toMatchObject({
+      sourceMediaUrl: 'https://media.divine.video/video.mp4',
+      sourceMediaHash: 'abc123',
+    })
+  })
+
+  it('rejects non-Divine media URLs', async () => {
+    await addConnectedPlatform(db, 'tiktok', 'conn_tiktok')
+    fetchMock.mockResolvedValueOnce(
+      Response.json({ event: nip71Event({ tags: [['imeta', 'url https://example.com/video.mp4', 'x abc123']] }) }),
+    )
+
+    await expect(
+      createManualCrossposts(testEnv(db, queueSend), {
+        pubkey: PUBKEY_A,
+        eventId: VIDEO_EVENT_ID,
+        platforms: ['tiktok'],
+      }),
+    ).rejects.toMatchObject({ status: 400, code: 'not_eligible' })
   })
 
   it('duplicate manual request returns the same jobs and does not enqueue duplicates', async () => {

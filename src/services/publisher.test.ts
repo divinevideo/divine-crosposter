@@ -125,6 +125,23 @@ describe('publisher service', () => {
     ])
   })
 
+  it('claims queued jobs atomically so duplicate delivery does not publish twice', async () => {
+    await seedConnectedJob(db, 'instagram')
+    fetchMock
+      .mockResolvedValueOnce(Response.json({ id: 'container-id' }))
+      .mockResolvedValueOnce(Response.json({ status_code: 'FINISHED' }))
+      .mockResolvedValueOnce(Response.json({ id: 'ig-post-id' }))
+
+    const results = await Promise.all([
+      processCrosspostJob(platformEnv(db, 'instagram'), 'job_1', { now: 2_000 }),
+      processCrosspostJob(platformEnv(db, 'instagram'), 'job_1', { now: 2_000 }),
+    ])
+
+    expect(results).toContainEqual({ status: 'posted' })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    await expect(listAttempts(db, 'job_1')).resolves.toHaveLength(1)
+  })
+
   it('polls a processing job and marks it posted when the platform is complete', async () => {
     await seedConnectedJob(db, 'tiktok', {
       status: 'processing',
@@ -146,6 +163,64 @@ describe('publisher service', () => {
     )
     expect(JSON.parse(String(fetchMock.mock.calls[0][1].body))).toEqual({ publish_id: 'publish-id' })
     await expect(getJob(db, 'job_1', PUBKEY_A)).resolves.toMatchObject({ status: 'posted' })
+  })
+
+  it('caps repeated processing polls with processing_timeout', async () => {
+    await seedConnectedJob(db, 'tiktok', {
+      status: 'processing',
+      externalPostId: 'publish-id',
+      nextRetryAt: 2_000,
+      retryCount: 5,
+    })
+    fetchMock.mockResolvedValueOnce(
+      Response.json({ data: { status: 'PROCESSING_UPLOAD', publish_id: 'publish-id' }, error: { code: 'ok' } }),
+    )
+
+    await expect(processCrosspostJob(platformEnv(db, 'tiktok'), 'job_1', { now: 2_000 })).resolves.toEqual({
+      status: 'failed',
+    })
+
+    await expect(getJob(db, 'job_1', PUBKEY_A)).resolves.toMatchObject({
+      status: 'failed',
+      retryCount: 6,
+      errorCode: 'processing_timeout',
+      nextRetryAt: null,
+    })
+  })
+
+  it('sanitizes refreshed token metadata before storing connection metadata', async () => {
+    await upsertConnection(
+      db,
+      connection({
+        id: 'conn_1',
+        platform: 'tiktok',
+        encryptedAccessToken: await encryptToken('old-access-token', KEY),
+        encryptedRefreshToken: await encryptToken('old-refresh-token', KEY),
+        tokenExpiresAt: 1_000,
+        metadataJson: '{}',
+      }),
+    )
+    await createOrGetJob(db, job({ id: 'job_1', platform: 'tiktok' }))
+    fetchMock
+      .mockResolvedValueOnce(
+        Response.json({
+          access_token: 'new-access-token',
+          refresh_token: 'new-refresh-token',
+          expires_in: 3600,
+          scope: 'video.publish',
+        }),
+      )
+      .mockResolvedValueOnce(Response.json({ data: { privacy_level_options: ['SELF_ONLY'] } }))
+      .mockResolvedValueOnce(Response.json({ data: { publish_id: 'publish-id' }, error: { code: 'ok' } }))
+
+    await expect(processCrosspostJob(platformEnv(db, 'tiktok'), 'job_1', { now: 2_000 })).resolves.toMatchObject({
+      status: 'processing',
+    })
+
+    const updated = await getConnection(db, 'conn_1', PUBKEY_A)
+    expect(updated?.metadataJson).not.toContain('new-access-token')
+    expect(updated?.metadataJson).not.toContain('new-refresh-token')
+    expect(updated?.metadataJson).toContain('expires_in')
   })
 
   it('marks revoked tokens as needs_reauth on the job and connection', async () => {

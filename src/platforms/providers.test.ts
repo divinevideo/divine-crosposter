@@ -409,4 +409,17 @@ describe('provider adapters', () => {
       status: { privacyStatus: 'private' },
     })
   })
+
+  it('requests YouTube offline consent for refresh tokens', () => {
+    const adapter = createYouTubeAdapter({ clientId: 'client', clientSecret: 'secret' })
+    const authorizationUrl = new URL(
+      adapter.buildAuthorizationUrl({
+        state: 'state-id',
+        redirectUri: 'https://crossposter.divine.video/connections/youtube/callback',
+      }),
+    )
+
+    expect(authorizationUrl.searchParams.get('access_type')).toBe('offline')
+    expect(authorizationUrl.searchParams.get('prompt')).toBe('consent')
+  })
 })

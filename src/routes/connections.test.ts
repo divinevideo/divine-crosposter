@@ -195,6 +195,44 @@ describe('connection routes', () => {
     })
     expect(body.connections[0]).not.toHaveProperty('encryptedAccessToken')
     expect(body.connections[0]).not.toHaveProperty('encryptedRefreshToken')
+    expect(body.connections[0]).not.toHaveProperty('metadataJson')
+  })
+
+  it('reconnect after disconnect restores the default manual preference', async () => {
+    await upsertConnection(db, connection({ id: 'conn_old', status: 'disconnected' }))
+    await setPreference(db, {
+      pubkey: PUBKEY_A,
+      platform: 'tiktok',
+      connectionId: null,
+      mode: 'disabled',
+      automaticEnabledAt: null,
+      createdAt: 1_000,
+      updatedAt: 1_500,
+    })
+    await createOAuthState(db, {
+      stateId: 'state_reconnect',
+      pubkey: PUBKEY_A,
+      platform: 'tiktok',
+      codeVerifier: 'pkce-verifier',
+      returnUrl: 'https://divine.video/settings/crossposting',
+      createdAt: 1_000,
+      expiresAt: 1_783_383_000,
+      metadataJson: '{}',
+    })
+    fetchMock
+      .mockResolvedValueOnce(Response.json({ access_token: 'access-token', refresh_token: 'refresh-token' }))
+      .mockResolvedValueOnce(Response.json({ data: { user: { open_id: 'external-account-1', display_name: 'Divine TikTok' } } }))
+
+    const response = await app.request(
+      '/connections/tiktok/callback?code=oauth-code&state=state_reconnect',
+      {},
+      testEnv(db),
+    )
+
+    expect(response.status).toBe(302)
+    await expect(getPreferences(db, PUBKEY_A)).resolves.toMatchObject([
+      { platform: 'tiktok', mode: 'manual', connectionId: 'conn_old', automaticEnabledAt: null },
+    ])
   })
 
   it('disconnects owned connections and disables the matching preference', async () => {

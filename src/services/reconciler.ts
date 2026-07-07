@@ -1,9 +1,11 @@
 import {
   AUTO_RECONCILE_MAX_USERS_PER_RUN,
+  AUTO_RECONCILE_QUEUED_JOB_LIMIT,
   AUTO_RECONCILE_USER_BATCH_SIZE,
   AUTO_RECONCILE_VIDEO_LIMIT_PER_USER,
 } from '../config'
 import { getCursor, upsertCursor } from '../db/cursors'
+import { listRunnableJobs } from '../db/jobs'
 import { listAutomaticPreferences } from '../db/preferences'
 import { listRecentUserVideos } from '../funnelcake/client'
 import type { DivineVideoEvent } from '../funnelcake/client'
@@ -14,6 +16,7 @@ export type ReconciliationResult = {
   usersChecked: number
   eventsChecked: number
   jobsCreatedOrFound: number
+  queuedJobsEnqueued: number
 }
 
 function groupPreferencesByPubkey(preferences: PreferenceRecord[]): Map<string, PreferenceRecord[]> {
@@ -49,6 +52,13 @@ export async function runAutoCrosspostReconciliation(
   let usersChecked = 0
   let eventsChecked = 0
   let jobsCreatedOrFound = 0
+  let queuedJobsEnqueued = 0
+
+  const runnableJobs = await listRunnableJobs(env.DB, now, AUTO_RECONCILE_QUEUED_JOB_LIMIT)
+  for (const job of runnableJobs) {
+    await env.CROSSPOST_QUEUE.send({ jobId: job.id })
+    queuedJobsEnqueued += 1
+  }
 
   while (usersChecked < AUTO_RECONCILE_MAX_USERS_PER_RUN) {
     const preferences = await listAutomaticPreferences(env.DB, AUTO_RECONCILE_USER_BATCH_SIZE, offset)
@@ -68,6 +78,9 @@ export async function runAutoCrosspostReconciliation(
       })
 
       for (const event of recent.events) {
+        if (cursor && event.created_at <= cursor.lastCheckedAt) {
+          continue
+        }
         eventsChecked += 1
         if (!hasEligibleAutomaticPreference(event, userPreferences)) {
           continue
@@ -85,5 +98,5 @@ export async function runAutoCrosspostReconciliation(
     }
   }
 
-  return { usersChecked, eventsChecked, jobsCreatedOrFound }
+  return { usersChecked, eventsChecked, jobsCreatedOrFound, queuedJobsEnqueued }
 }
