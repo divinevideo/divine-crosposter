@@ -105,6 +105,14 @@ Processes one platform publish job at a time:
 
 The consumer should prefer external platform fetch-from-URL flows where available. It should not do CPU-heavy video processing in the Worker.
 
+### Auto Trigger Reconciler
+
+Runs as a Cloudflare Scheduled Worker inside `divine-crossposter`.
+
+The primary automatic trigger is still a push from Divine web or mobile after a successful publish. The reconciler is the backup path: it periodically scans users with automatic mode enabled, asks Funnelcake for recent eligible videos since each user's cursor, and calls the same idempotent job-creation logic used by the client push path.
+
+This gives automatic crossposting a small poll/push bot without making polling the only source of truth. If a client publishes a video and fails before notifying crossposter, the next reconciliation pass catches it. Duplicate triggers are safe because job creation is keyed by `(pubkey, video_event_id, platform, external_account_id)`.
+
 ### Future Media Normalization Service
 
 If platforms reject Divine media because of codec, aspect ratio, duration, or file-size constraints, add a separate normalization service. That service can run on GKE or Cloud Run and output a platform-ready temporary asset. Do not hide transcoding inside the Worker.
@@ -170,7 +178,9 @@ If a refresh fails with an authorization error, mark the connection `needs_reaut
 3. After a future Divine video publish succeeds, the publishing client calls `divine-crossposter` with the newly published event ID.
 4. Worker fetches the event from Funnelcake, verifies ownership and event timestamp, checks preferences, and creates idempotent jobs for enabled platforms.
 
-This keeps V1 explicit and easy to reason about from web and mobile. A later version can add a relay/event-stream consumer so automatic crossposting is less dependent on client follow-up calls.
+The Scheduled Worker reconciler also checks recent videos for users with automatic mode enabled. It maintains per-user cursors, ignores videos older than `automatic_enabled_at`, and enqueues any missing jobs through the same idempotent creation path.
+
+This keeps V1 explicit and easy to reason about from web and mobile while still covering missed client callbacks. A later version can add a relay/event-stream consumer if polling recent videos becomes too slow or too expensive.
 
 ## Platform Publishing Notes
 
@@ -227,6 +237,7 @@ Use D1 with these logical tables:
 - `oauth_states`: short-lived OAuth state records bound to a Divine pubkey, provider, return URL, and expiry
 - `connections`: encrypted provider token records and external account metadata
 - `preferences`: per-user, per-platform mode and automatic enablement timestamp
+- `auto_cursors`: per-user reconciliation cursors for recent-video polling
 - `jobs`: one row per `(pubkey, video_event_id, platform, external_account_id)`
 - `job_attempts`: append-only attempt history for retries, platform responses, and audit-safe error details
 
@@ -249,6 +260,7 @@ Integration tests with mocked platform APIs:
 - revoked token refresh leading to `needs_reauth`
 - manual crosspost duplicate prevention
 - automatic crosspost ignores videos older than `automatic_enabled_at`
+- reconciler enqueues missed automatic jobs once and advances cursors safely
 - queue consumer success and retry paths
 
 Manual verification before launch:
@@ -269,7 +281,7 @@ Ship manual crossposting first, then automatic crossposting once token refresh, 
 ## Implementation Defaults
 
 - Storage: D1 for V1.
-- Automatic trigger: web/mobile calls crossposter after a successful future Divine publish.
+- Automatic trigger: web/mobile calls crossposter after a successful future Divine publish; a Scheduled Worker reconciler polls recent videos for opted-in users as the backup path.
 - Divine auth: accept the same Keycast/Login bearer-token model used by Divine clients; add NIP-98 later only if a caller needs it.
 - OAuth code sharing: copy provider adapter patterns from `divine-identify-verification-service` first; extract a shared package only after duplication is proven.
 - Platform readiness: ship provider support behind per-platform feature flags so app-review delays do not block the whole service.
