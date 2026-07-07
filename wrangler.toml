@@ -14,7 +14,7 @@ ENABLE_YOUTUBE = "false"
 [[d1_databases]]
 binding = "DB"
 database_name = "divine-crossposter"
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "8e84ca74-0dab-40cc-a8d7-b5cf03f32287"
 migrations_dir = "migrations"
 
 [[queues.producers]]
