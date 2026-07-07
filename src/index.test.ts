@@ -1,20 +1,30 @@
 import { describe, expect, it } from 'vitest'
 import { app } from './index'
+import type { Env } from './types'
+
+function env(overrides: Partial<Env> = {}): Env {
+  return {
+    DB: {} as D1Database,
+    CROSSPOST_QUEUE: {} as Queue<{ jobId: string }>,
+    KEYCAST_URL: 'https://keycast.divine.video',
+    FUNNELCAKE_URL: 'https://api.divine.video',
+    OAUTH_REDIRECT_BASE: 'https://crossposter.divine.video',
+    TOKEN_ENCRYPTION_KEY: '0123456789abcdef0123456789abcdef',
+    ...overrides,
+  }
+}
 
 describe('health route', () => {
-  it('returns branded service identity at root', async () => {
-    const res = await app.request('/')
+  it('returns branded service UI at root', async () => {
+    const res = await app.request('/', {}, env())
 
     expect(res.status).toBe(200)
-    await expect(res.json()).resolves.toEqual({
-      ok: true,
-      service: 'divine-crossposter',
-      name: 'Divine Crossposter',
-      endpoints: {
-        health: '/health',
-        platforms: '/platforms',
-      },
-    })
+    expect(res.headers.get('content-type')).toContain('text/html')
+    const html = await res.text()
+    expect(html).toContain('<title>Divine Crossposter</title>')
+    expect(html).toContain('di<span>V</span>ine Crossposter')
+    expect(html).toContain('Send your loops farther.')
+    expect(html).toContain('No slop. All human.')
   })
 
   it('returns service health', async () => {
