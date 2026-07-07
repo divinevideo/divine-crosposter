@@ -5,6 +5,7 @@ import { health } from './routes/health'
 import { platforms } from './routes/platforms'
 import { preferences } from './routes/preferences'
 import { processCrosspostJob, PublisherRetryError } from './services/publisher'
+import { runAutoCrosspostReconciliation } from './services/reconciler'
 import type { Env } from './types'
 
 const app = new Hono<{ Bindings: Env }>()
@@ -36,7 +37,7 @@ export default {
       }
     }
   },
-  async scheduled(_event: ScheduledEvent, _env: Env, _ctx: ExecutionContext): Promise<void> {
-    return
+  async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
+    await runAutoCrosspostReconciliation(env)
   },
 }
