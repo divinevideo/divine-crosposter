@@ -1,6 +1,9 @@
 name = "divine-crossposter"
 main = "src/index.ts"
 compatibility_date = "2025-09-06"
+routes = [
+  { pattern = "crossposter.divine.video", custom_domain = true }
+]
 
 [vars]
 KEYCAST_URL = "https://login.divine.video"
