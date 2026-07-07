@@ -61,6 +61,7 @@ npm run test:once
 | `FUNNELCAKE_URL` | Base URL for Funnelcake event/video lookups. Defaults to `https://api.divine.video`. |
 | `OAUTH_REDIRECT_BASE` | Public Worker origin used to build OAuth callback URLs. |
 | `ENABLE_INSTAGRAM` | Set to `true` only after Instagram OAuth credentials are configured. |
+| `INSTAGRAM_CLIENT_ID` | Meta app id used for Instagram OAuth. |
 | `ENABLE_TIKTOK` | Set to `true` only after TikTok OAuth credentials are configured. |
 | `ENABLE_X` | Set to `true` only after X OAuth credentials are configured. |
 | `ENABLE_YOUTUBE` | Set to `true` only after Google/YouTube OAuth credentials are configured. |
@@ -70,7 +71,6 @@ Set secrets with Wrangler:
 
 ```bash
 npx wrangler secret put TOKEN_ENCRYPTION_KEY
-npx wrangler secret put INSTAGRAM_CLIENT_ID
 npx wrangler secret put INSTAGRAM_CLIENT_SECRET
 npx wrangler secret put TWITTER_CLIENT_ID
 npx wrangler secret put TWITTER_CLIENT_SECRET
@@ -223,6 +223,16 @@ Funnelcake:
 - The scheduled reconciler uses Funnelcake to scan recent eligible videos for users with automatic mode enabled.
 
 ## Deployment
+
+Merges to `main` deploy automatically through GitHub Actions. The workflow:
+
+1. Installs dependencies with `npm ci`.
+2. Runs `npm run typecheck` and `npm run test:once`.
+3. Applies remote D1 migrations.
+4. Deploys the Worker with Wrangler.
+5. Smoke-tests the live health, UI, and platform endpoints.
+
+The deploy job uses the org-level `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` GitHub secrets. This repo must be included in the selected-repository access list for `CLOUDFLARE_API_TOKEN`.
 
 Create infrastructure first:
 
