@@ -279,9 +279,9 @@ describe('provider adapters', () => {
     const adapter = createXAdapter({ clientId: 'client', clientSecret: 'secret' })
     fetchMock
       .mockResolvedValueOnce(new Response(VIDEO_BYTES))
-      .mockResolvedValueOnce(Response.json({ media_id_string: 'media-id' }))
+      .mockResolvedValueOnce(Response.json({ data: { id: 'media-id' } }))
       .mockResolvedValueOnce(new Response(null, { status: 204 }))
-      .mockResolvedValueOnce(Response.json({ media_id_string: 'media-id' }))
+      .mockResolvedValueOnce(Response.json({ data: { id: 'media-id' } }))
       .mockResolvedValueOnce(Response.json({ data: { id: 'tweet-id' } }))
 
     await expect(adapter.publishVideo(publishInput())).resolves.toMatchObject({
@@ -302,6 +302,33 @@ describe('provider adapters', () => {
       expect.objectContaining({ method: 'POST' }),
     )
     await expect(bodyAsJson(fetchMock.mock.calls[4])).resolves.toMatchObject({
+      text: 'caption',
+      media: { media_ids: ['media-id'] },
+    })
+  })
+
+  it('returns processing for X finalize processing_info and posts after status succeeds', async () => {
+    const adapter = createXAdapter({ clientId: 'client', clientSecret: 'secret' })
+    fetchMock
+      .mockResolvedValueOnce(new Response(VIDEO_BYTES))
+      .mockResolvedValueOnce(Response.json({ data: { id: 'media-id' } }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(Response.json({ data: { id: 'media-id', processing_info: { state: 'pending' } } }))
+
+    const processing = await adapter.publishVideo(publishInput())
+    expect(processing).toMatchObject({ status: 'processing', externalPostId: 'media-id' })
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+
+    fetchMock
+      .mockResolvedValueOnce(Response.json({ data: { id: 'media-id', processing_info: { state: 'succeeded' } } }))
+      .mockResolvedValueOnce(Response.json({ data: { id: 'tweet-id' } }))
+
+    await expect(
+      adapter.pollPublishStatus?.({ accessToken: 'access', providerResponse: processing.providerResponse }),
+    ).resolves.toMatchObject({ status: 'posted', externalPostId: 'tweet-id' })
+
+    expect(String(fetchMock.mock.calls[4][0])).toBe('https://api.x.com/2/media/upload?command=STATUS&media_id=media-id')
+    await expect(bodyAsJson(fetchMock.mock.calls[5])).resolves.toMatchObject({
       text: 'caption',
       media: { media_ids: ['media-id'] },
     })

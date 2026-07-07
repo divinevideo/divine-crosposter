@@ -30,6 +30,37 @@ function tokenSetFromResponse(response: Record<string, unknown>): TokenSet {
   }
 }
 
+function xData(response: Record<string, unknown>): Record<string, unknown> {
+  return asRecord(response.data)
+}
+
+function mediaIdFromResponse(response: Record<string, unknown>): string {
+  const data = xData(response)
+  return String(data.id ?? response.media_id_string ?? response.media_id ?? '')
+}
+
+function processingInfoFromResponse(response: Record<string, unknown>): Record<string, unknown> {
+  const data = xData(response)
+  return asRecord(data.processing_info ?? response.processing_info)
+}
+
+function processingState(response: Record<string, unknown>): string {
+  return String(processingInfoFromResponse(response).state ?? '')
+}
+
+async function createPost(accessToken: string, mediaId: string, caption: string): Promise<Record<string, unknown>> {
+  return asRecord(
+    await expectProviderOk(
+      'x',
+      await fetch(`${API_BASE}/tweets`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ text: caption, media: { media_ids: [mediaId] } }),
+      }),
+    ),
+  )
+}
+
 export function createXAdapter(config: XConfig): PlatformAdapter {
   return {
     platform: 'x',
@@ -92,7 +123,7 @@ export function createXAdapter(config: XConfig): PlatformAdapter {
           }),
         ),
       )
-      const mediaId = String(init.media_id_string ?? init.media_id ?? '')
+      const mediaId = mediaIdFromResponse(init)
       await expectProviderOk(
         'x',
         await fetch(UPLOAD_BASE, {
@@ -116,18 +147,43 @@ export function createXAdapter(config: XConfig): PlatformAdapter {
           }),
         ),
       )
-      const tweet = asRecord(
-        await expectProviderOk(
-          'x',
-          await fetch(`${API_BASE}/tweets`, {
-            method: 'POST',
-            headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
-            body: JSON.stringify({ text: caption, media: { media_ids: [mediaId] } }),
-          }),
-        ),
-      )
+      if (processingState(finalize)) {
+        return {
+          status: 'processing',
+          externalPostId: mediaId,
+          providerResponse: { init, finalize, mediaId, caption },
+        }
+      }
+
+      const tweet = await createPost(accessToken, mediaId, caption)
       const data = asRecord(tweet.data)
       return { status: 'posted', externalPostId: String(data.id ?? ''), providerResponse: { init, finalize, tweet } }
+    },
+    async pollPublishStatus({ accessToken, providerResponse }) {
+      const mediaId = String(providerResponse.mediaId ?? mediaIdFromResponse(providerResponse))
+      const caption = String(providerResponse.caption ?? '')
+      const url = new URL(UPLOAD_BASE)
+      url.searchParams.set('command', 'STATUS')
+      url.searchParams.set('media_id', mediaId)
+      const statusResponse = asRecord(
+        await expectProviderOk('x', await fetch(url.toString(), { headers: { authorization: `Bearer ${accessToken}` } })),
+      )
+      const state = processingState(statusResponse)
+      if (state && state !== 'succeeded') {
+        return {
+          status: 'processing',
+          externalPostId: mediaId,
+          providerResponse: { ...providerResponse, status: statusResponse, mediaId, caption },
+        }
+      }
+
+      const tweet = await createPost(accessToken, mediaId, caption)
+      const data = asRecord(tweet.data)
+      return {
+        status: 'posted',
+        externalPostId: String(data.id ?? ''),
+        providerResponse: { ...providerResponse, status: statusResponse, tweet, mediaId },
+      }
     },
   }
 }
