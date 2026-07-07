@@ -119,6 +119,45 @@ describe('provider adapters', () => {
     )
   })
 
+  it('discovers Instagram business account id and publishes with that id', async () => {
+    const adapter = createInstagramAdapter({ clientId: 'client', clientSecret: 'secret' })
+    fetchMock
+      .mockResolvedValueOnce(
+        Response.json({
+          data: [
+            {
+              id: 'facebook-page-id',
+              name: 'Divine Page',
+              instagram_business_account: {
+                id: 'ig-business-id',
+                username: 'divinevideo',
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(Response.json({ id: 'container-id' }))
+      .mockResolvedValueOnce(Response.json({ status_code: 'FINISHED' }))
+      .mockResolvedValueOnce(Response.json({ id: 'ig-post-id' }))
+
+    const account = await adapter.fetchAccount({ accessToken: 'access' })
+    expect(account).toMatchObject({
+      id: 'ig-business-id',
+      name: 'divinevideo',
+      metadata: { pageId: 'facebook-page-id' },
+    })
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/me/accounts')
+    expect(String(fetchMock.mock.calls[0][0])).toContain('instagram_business_account')
+
+    await adapter.publishVideo({ ...publishInput(), externalAccountId: account.id })
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      'https://graph.facebook.com/v20.0/ig-business-id/media',
+      expect.objectContaining({ method: 'POST' }),
+    )
+  })
+
   it('polls an Instagram processing container and publishes when finished', async () => {
     const adapter = createInstagramAdapter({ clientId: 'client', clientSecret: 'secret' })
     fetchMock
@@ -159,11 +198,15 @@ describe('provider adapters', () => {
           },
         }),
       )
-      .mockResolvedValueOnce(Response.json({ publish_id: 'publish-id' }))
+      .mockResolvedValueOnce(Response.json({ data: { publish_id: 'publish-id' } }))
 
     await expect(adapter.publishVideo(publishInput())).resolves.toMatchObject({
       status: 'processing',
       externalPostId: 'publish-id',
+      providerResponse: {
+        publish_id: 'publish-id',
+        data: { publish_id: 'publish-id' },
+      },
     })
 
     expect(fetchMock).toHaveBeenNthCalledWith(
@@ -186,6 +229,31 @@ describe('provider adapters', () => {
       source_info: { source: 'PULL_FROM_URL', video_url: 'https://cdn.divine.video/video.mp4' },
       post_info: { title: 'caption' },
     })
+  })
+
+  it('polls TikTok nested status responses by publish id', async () => {
+    const adapter = createTikTokAdapter({ clientKey: 'client', clientSecret: 'secret' })
+    fetchMock.mockResolvedValueOnce(Response.json({ data: { status: 'PUBLISH_COMPLETE' } }))
+
+    await expect(
+      adapter.pollPublishStatus?.({
+        accessToken: 'access',
+        providerResponse: { data: { publish_id: 'publish-id' } },
+      }),
+    ).resolves.toMatchObject({
+      status: 'posted',
+      externalPostId: 'publish-id',
+      providerResponse: { data: { status: 'PUBLISH_COMPLETE' } },
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://open.tiktokapis.com/v2/post/publish/status/fetch/',
+      expect.objectContaining({
+        method: 'POST',
+        headers: { authorization: 'Bearer access', 'content-type': 'application/json' },
+      }),
+    )
+    await expect(bodyAsJson(fetchMock.mock.calls[0])).resolves.toEqual({ publish_id: 'publish-id' })
   })
 
   it('maps TikTok creator-info without private visibility support to platform review required', async () => {

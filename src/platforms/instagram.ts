@@ -64,14 +64,18 @@ export function createInstagramAdapter(config: InstagramConfig): PlatformAdapter
     },
     async fetchAccount({ accessToken }) {
       const url = new URL(`${GRAPH_BASE}/me/accounts`)
+      url.searchParams.set('fields', 'id,name,instagram_business_account{id,username}')
       url.searchParams.set('access_token', accessToken)
       const body = asRecord(await expectProviderOk('instagram', await fetch(url.toString())))
       const accounts = Array.isArray(body.data) ? body.data : []
       const account = asRecord(accounts[0])
+      const instagramBusinessAccount = asRecord(account.instagram_business_account)
+      const instagramAccountId = String(instagramBusinessAccount.id ?? '')
+      const pageId = String(account.id ?? '')
       return {
-        id: String(account.id ?? ''),
-        name: String(account.name ?? account.username ?? 'Instagram account'),
-        metadata: body,
+        id: instagramAccountId,
+        name: String(instagramBusinessAccount.username ?? account.name ?? 'Instagram account'),
+        metadata: { ...body, pageId, page: account, instagramBusinessAccount },
       }
     },
     async publishVideo(input: PublishInput): Promise<PublishResult> {

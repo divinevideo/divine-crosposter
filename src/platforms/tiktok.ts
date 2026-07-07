@@ -41,6 +41,24 @@ function privacyLevelForV1(creatorInfo: Record<string, unknown>): string {
   return 'SELF_ONLY'
 }
 
+function tiktokData(response: Record<string, unknown>): Record<string, unknown> {
+  return asRecord(response.data)
+}
+
+function tiktokPublishId(response: Record<string, unknown>): string {
+  const data = tiktokData(response)
+  return String(data.publish_id ?? response.publish_id ?? '')
+}
+
+function tiktokStatus(response: Record<string, unknown>): string {
+  const data = tiktokData(response)
+  return String(data.status ?? response.status ?? '')
+}
+
+function publishIdFromProviderResponse(providerResponse: Record<string, unknown>): string {
+  return String(providerResponse.publish_id ?? tiktokData(providerResponse).publish_id ?? providerResponse.externalPostId ?? '')
+}
+
 export function createTikTokAdapter(config: TikTokConfig): PlatformAdapter {
   return {
     platform: 'tiktok',
@@ -108,18 +126,23 @@ export function createTikTokAdapter(config: TikTokConfig): PlatformAdapter {
         }),
       })
       const body = asRecord(await expectProviderOk('tiktok', response))
-      return { status: 'processing', externalPostId: String(body.publish_id ?? ''), providerResponse: { creatorInfo, ...body } }
+      const publishId = tiktokPublishId(body)
+      return {
+        status: 'processing',
+        externalPostId: publishId,
+        providerResponse: { creatorInfo, ...body, publish_id: publishId },
+      }
     },
     async pollPublishStatus({ accessToken, providerResponse }) {
-      const publishId = String(providerResponse.publish_id ?? providerResponse.externalPostId ?? '')
+      const publishId = publishIdFromProviderResponse(providerResponse)
       const response = await fetch(`${API_BASE}/post/publish/status/fetch/`, {
         method: 'POST',
         headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
         body: JSON.stringify({ publish_id: publishId }),
       })
       const body = asRecord(await expectProviderOk('tiktok', response))
-      const status = body.status === 'PUBLISH_COMPLETE' ? 'posted' : 'processing'
-      return { status, externalPostId: publishId, providerResponse: body }
+      const status = tiktokStatus(body) === 'PUBLISH_COMPLETE' ? 'posted' : 'processing'
+      return { status, externalPostId: publishId, providerResponse: { ...body, publish_id: publishId } }
     },
   }
 }
