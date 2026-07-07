@@ -82,6 +82,11 @@ describe('provider adapters', () => {
     await expect(adapter.publishVideo(publishInput())).resolves.toMatchObject({
       status: 'processing',
       externalPostId: 'container-id',
+      providerResponse: {
+        id: 'container-id',
+        creationId: 'container-id',
+        externalAccountId: 'account-id',
+      },
     })
 
     expect(fetchMock).toHaveBeenCalledTimes(2)
@@ -114,26 +119,92 @@ describe('provider adapters', () => {
     )
   })
 
+  it('polls an Instagram processing container and publishes when finished', async () => {
+    const adapter = createInstagramAdapter({ clientId: 'client', clientSecret: 'secret' })
+    fetchMock
+      .mockResolvedValueOnce(Response.json({ status_code: 'FINISHED' }))
+      .mockResolvedValueOnce(Response.json({ id: 'ig-post-id', permalink: 'https://instagram.com/reel/id' }))
+
+    await expect(
+      adapter.pollPublishStatus?.({
+        accessToken: 'access',
+        providerResponse: {
+          creationId: 'container-id',
+          externalAccountId: 'account-id',
+        },
+      }),
+    ).resolves.toMatchObject({
+      status: 'posted',
+      externalPostId: 'ig-post-id',
+      externalPostUrl: 'https://instagram.com/reel/id',
+    })
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('https://graph.facebook.com/v20.0/container-id')
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      'https://graph.facebook.com/v20.0/account-id/media_publish',
+      expect.objectContaining({ method: 'POST' }),
+    )
+  })
+
   it('starts TikTok direct post with pull-from-url source info', async () => {
     const adapter = createTikTokAdapter({ clientKey: 'client', clientSecret: 'secret' })
-    fetchMock.mockResolvedValueOnce(Response.json({ publish_id: 'publish-id' }))
+    fetchMock
+      .mockResolvedValueOnce(
+        Response.json({
+          data: {
+            creator_info: {
+              privacy_level_options: ['PUBLIC_TO_EVERYONE', 'SELF_ONLY'],
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(Response.json({ publish_id: 'publish-id' }))
 
     await expect(adapter.publishVideo(publishInput())).resolves.toMatchObject({
       status: 'processing',
       externalPostId: 'publish-id',
     })
 
-    expect(fetchMock).toHaveBeenCalledWith(
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      'https://open.tiktokapis.com/v2/post/publish/creator_info/query/',
+      expect.objectContaining({
+        method: 'POST',
+        headers: { authorization: 'Bearer access', 'content-type': 'application/json' },
+      }),
+    )
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
       'https://open.tiktokapis.com/v2/post/publish/video/init/',
       expect.objectContaining({
         method: 'POST',
         headers: { authorization: 'Bearer access', 'content-type': 'application/json' },
       }),
     )
-    await expect(bodyAsJson(fetchMock.mock.calls[0])).resolves.toMatchObject({
+    await expect(bodyAsJson(fetchMock.mock.calls[1])).resolves.toMatchObject({
       source_info: { source: 'PULL_FROM_URL', video_url: 'https://cdn.divine.video/video.mp4' },
       post_info: { title: 'caption' },
     })
+  })
+
+  it('maps TikTok creator-info without private visibility support to platform review required', async () => {
+    const adapter = createTikTokAdapter({ clientKey: 'client', clientSecret: 'secret' })
+    fetchMock.mockResolvedValueOnce(
+      Response.json({
+        data: {
+          creator_info: {
+            privacy_level_options: ['FOLLOWER_OF_CREATOR'],
+          },
+        },
+      }),
+    )
+
+    await expect(adapter.publishVideo(publishInput())).rejects.toMatchObject({
+      code: 'platform_review_required',
+      platform: 'tiktok',
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('uploads X video bytes with INIT, APPEND, FINALIZE, then creates a post', async () => {

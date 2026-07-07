@@ -1,4 +1,4 @@
-import { asRecord, expectProviderOk } from './adapter'
+import { PlatformAdapterError, asRecord, expectProviderOk } from './adapter'
 import type { PlatformAdapter, PublishResult, TokenSet } from './adapter'
 
 type TikTokConfig = {
@@ -17,6 +17,28 @@ function tokenSetFromResponse(response: Record<string, unknown>): TokenSet {
     scopes: typeof response.scope === 'string' ? response.scope.split(',').map((scope) => scope.trim()) : [],
     metadata: response,
   }
+}
+
+function creatorInfoFromResponse(response: Record<string, unknown>): Record<string, unknown> {
+  const data = asRecord(response.data)
+  return asRecord(data.creator_info)
+}
+
+function privacyLevelForV1(creatorInfo: Record<string, unknown>): string {
+  if (
+    creatorInfo.direct_post_available === false ||
+    creatorInfo.direct_post_enabled === false ||
+    creatorInfo.can_post === false
+  ) {
+    throw new PlatformAdapterError('tiktok', 'platform_review_required', 'TikTok direct post is not available')
+  }
+
+  const options = creatorInfo.privacy_level_options
+  if (Array.isArray(options) && options.length > 0 && !options.includes('SELF_ONLY')) {
+    throw new PlatformAdapterError('tiktok', 'platform_review_required', 'TikTok private posting is not available')
+  }
+
+  return 'SELF_ONLY'
 }
 
 export function createTikTokAdapter(config: TikTokConfig): PlatformAdapter {
@@ -70,16 +92,23 @@ export function createTikTokAdapter(config: TikTokConfig): PlatformAdapter {
       }
     },
     async publishVideo({ accessToken, videoUrl, caption }): Promise<PublishResult> {
+      const creatorInfoResponse = await fetch(`${API_BASE}/post/publish/creator_info/query/`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
+      })
+      const creatorInfo = creatorInfoFromResponse(asRecord(await expectProviderOk('tiktok', creatorInfoResponse)))
+      const privacyLevel = privacyLevelForV1(creatorInfo)
+
       const response = await fetch(`${API_BASE}/post/publish/video/init/`, {
         method: 'POST',
         headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
         body: JSON.stringify({
-          post_info: { title: caption, privacy_level: 'SELF_ONLY', disable_duet: false, disable_comment: false },
+          post_info: { title: caption, privacy_level: privacyLevel, disable_duet: false, disable_comment: false },
           source_info: { source: 'PULL_FROM_URL', video_url: videoUrl },
         }),
       })
       const body = asRecord(await expectProviderOk('tiktok', response))
-      return { status: 'processing', externalPostId: String(body.publish_id ?? ''), providerResponse: body }
+      return { status: 'processing', externalPostId: String(body.publish_id ?? ''), providerResponse: { creatorInfo, ...body } }
     },
     async pollPublishStatus({ accessToken, providerResponse }) {
       const publishId = String(providerResponse.publish_id ?? providerResponse.externalPostId ?? '')

@@ -19,6 +19,15 @@ function tokenSetFromResponse(response: Record<string, unknown>): TokenSet {
   }
 }
 
+function instagramCreationId(providerResponse: Record<string, unknown>): string {
+  const container = asRecord(providerResponse.container)
+  return String(providerResponse.creationId ?? providerResponse.id ?? providerResponse.creation_id ?? container.id ?? '')
+}
+
+function instagramExternalAccountId(providerResponse: Record<string, unknown>): string {
+  return String(providerResponse.externalAccountId ?? providerResponse.external_account_id ?? '')
+}
+
 async function postForm(url: string, body: URLSearchParams): Promise<Record<string, unknown>> {
   const response = await fetch(url, { method: 'POST', body })
   return asRecord(await expectProviderOk('instagram', response))
@@ -88,7 +97,13 @@ export function createInstagramAdapter(config: InstagramConfig): PlatformAdapter
         return {
           status: 'processing',
           externalPostId: creationId,
-          providerResponse: { container, status },
+          providerResponse: {
+            id: creationId,
+            creationId,
+            externalAccountId: input.externalAccountId,
+            container,
+            status,
+          },
         }
       }
 
@@ -100,15 +115,49 @@ export function createInstagramAdapter(config: InstagramConfig): PlatformAdapter
         ),
       )
       const externalPostId = String(published.id ?? creationId)
-      return { status: 'posted', externalPostId, providerResponse: { container, published } }
+      return {
+        status: 'posted',
+        externalPostId,
+        externalPostUrl: typeof published.permalink === 'string' ? published.permalink : undefined,
+        providerResponse: {
+          id: creationId,
+          creationId,
+          externalAccountId: input.externalAccountId,
+          container,
+          status,
+          published,
+        },
+      }
     },
     async pollPublishStatus({ accessToken, providerResponse }) {
-      const creationId = String(providerResponse.id ?? providerResponse.creation_id ?? '')
+      const creationId = instagramCreationId(providerResponse)
       const url = new URL(`${GRAPH_BASE}/${creationId}`)
       url.searchParams.set('fields', 'status_code')
       url.searchParams.set('access_token', accessToken)
-      const body = asRecord(await expectProviderOk('instagram', await fetch(url.toString())))
-      return { status: body.status_code === 'FINISHED' ? 'posted' : 'processing', providerResponse: body }
+      const status = asRecord(await expectProviderOk('instagram', await fetch(url.toString())))
+      if (status.status_code !== 'FINISHED') {
+        return {
+          status: 'processing',
+          externalPostId: creationId,
+          providerResponse: { ...providerResponse, id: creationId, creationId, status },
+        }
+      }
+
+      const externalAccountId = instagramExternalAccountId(providerResponse)
+      const publishBody = new URLSearchParams({ creation_id: creationId, access_token: accessToken })
+      const published = asRecord(
+        await expectProviderOk(
+          'instagram',
+          await fetch(`${GRAPH_BASE}/${externalAccountId}/media_publish`, { method: 'POST', body: publishBody }),
+        ),
+      )
+      const externalPostId = String(published.id ?? creationId)
+      return {
+        status: 'posted',
+        externalPostId,
+        externalPostUrl: typeof published.permalink === 'string' ? published.permalink : undefined,
+        providerResponse: { ...providerResponse, id: creationId, creationId, status, published },
+      }
     },
   }
 }
