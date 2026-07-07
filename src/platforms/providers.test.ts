@@ -192,9 +192,7 @@ describe('provider adapters', () => {
       .mockResolvedValueOnce(
         Response.json({
           data: {
-            creator_info: {
-              privacy_level_options: ['PUBLIC_TO_EVERYONE', 'SELF_ONLY'],
-            },
+            privacy_level_options: ['PUBLIC_TO_EVERYONE', 'SELF_ONLY'],
           },
         }),
       )
@@ -231,6 +229,25 @@ describe('provider adapters', () => {
     })
   })
 
+  it('rejects TikTok HTTP 200 responses with provider error codes', async () => {
+    const adapter = createTikTokAdapter({ clientKey: 'client', clientSecret: 'secret' })
+    fetchMock.mockResolvedValueOnce(
+      Response.json({
+        error: {
+          code: 'access_token_invalid',
+          message: 'access token is invalid',
+        },
+      }),
+    )
+
+    await expect(adapter.publishVideo(publishInput())).rejects.toMatchObject({
+      code: 'needs_reauth',
+      providerStatus: 200,
+      platform: 'tiktok',
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it('polls TikTok nested status responses by publish id', async () => {
     const adapter = createTikTokAdapter({ clientKey: 'client', clientSecret: 'secret' })
     fetchMock.mockResolvedValueOnce(Response.json({ data: { status: 'PUBLISH_COMPLETE' } }))
@@ -261,9 +278,7 @@ describe('provider adapters', () => {
     fetchMock.mockResolvedValueOnce(
       Response.json({
         data: {
-          creator_info: {
-            privacy_level_options: ['FOLLOWER_OF_CREATOR'],
-          },
+          privacy_level_options: ['FOLLOWER_OF_CREATOR'],
         },
       }),
     )
@@ -293,9 +308,12 @@ describe('provider adapters', () => {
     expect(String(fetchMock.mock.calls[1][0])).toBe('https://api.x.com/2/media/upload')
     expect(bodyAsParams(fetchMock.mock.calls[1]).get('command')).toBe('INIT')
     expect(bodyAsParams(fetchMock.mock.calls[1]).get('total_bytes')).toBe(String(VIDEO_BYTES.byteLength))
-    expect(bodyAsParams(fetchMock.mock.calls[2]).get('command')).toBe('APPEND')
-    expect(bodyAsParams(fetchMock.mock.calls[2]).get('media_id')).toBe('media-id')
-    expect(bodyAsParams(fetchMock.mock.calls[3]).get('command')).toBe('FINALIZE')
+    expect(String(fetchMock.mock.calls[2][0])).toBe('https://api.x.com/2/media/upload/media-id/append')
+    await expect(bodyAsJson(fetchMock.mock.calls[2])).resolves.toMatchObject({
+      media: expect.any(String),
+      segment_index: 0,
+    })
+    expect(String(fetchMock.mock.calls[3][0])).toBe('https://api.x.com/2/media/upload/media-id/finalize')
     expect(fetchMock).toHaveBeenNthCalledWith(
       5,
       'https://api.x.com/2/tweets',

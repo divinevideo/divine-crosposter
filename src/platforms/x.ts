@@ -126,24 +126,21 @@ export function createXAdapter(config: XConfig): PlatformAdapter {
       const mediaId = mediaIdFromResponse(init)
       await expectProviderOk(
         'x',
-        await fetch(UPLOAD_BASE, {
+        await fetch(`${UPLOAD_BASE}/${mediaId}/append`, {
           method: 'POST',
-          headers: { authorization: `Bearer ${accessToken}` },
-          body: new URLSearchParams({
-            command: 'APPEND',
-            media_id: mediaId,
-            segment_index: '0',
-            media_data: bytesToBase64(video.bytes),
+          headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
+          body: JSON.stringify({
+            media: bytesToBase64(video.bytes),
+            segment_index: 0,
           }),
         }),
       )
       const finalize = asRecord(
         await expectProviderOk(
           'x',
-          await fetch(UPLOAD_BASE, {
+          await fetch(`${UPLOAD_BASE}/${mediaId}/finalize`, {
             method: 'POST',
             headers: { authorization: `Bearer ${accessToken}` },
-            body: new URLSearchParams({ command: 'FINALIZE', media_id: mediaId }),
           }),
         ),
       )

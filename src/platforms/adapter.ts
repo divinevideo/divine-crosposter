@@ -91,11 +91,43 @@ export async function normalizeProviderError(platform: Platform, response: Respo
   return new PlatformAdapterError(platform, code, `${platform} provider request failed`, response.status, providerResponse)
 }
 
+function normalizeTikTokErrorCode(providerResponse: unknown): ErrorCode | null {
+  const body = asRecord(providerResponse)
+  const error = asRecord(body.error)
+  const code = typeof error.code === 'string' ? error.code : ''
+
+  if (!code || code === 'ok') return null
+
+  const normalized = code.toLowerCase()
+  if (
+    normalized.includes('access_token') ||
+    normalized.includes('scope') ||
+    normalized.includes('unauthorized') ||
+    normalized.includes('forbidden')
+  ) {
+    return 'needs_reauth'
+  }
+  if (normalized.includes('rate_limit') || normalized.includes('too_many')) {
+    return 'rate_limited'
+  }
+  if (includesMediaRejection(providerResponse)) {
+    return 'media_rejected'
+  }
+  return 'unknown_platform_error'
+}
+
 export async function expectProviderOk(platform: Platform, response: Response): Promise<unknown> {
   if (!response.ok) {
     throw await normalizeProviderError(platform, response)
   }
-  return readProviderResponse(response)
+  const providerResponse = await readProviderResponse(response)
+  if (platform === 'tiktok') {
+    const code = normalizeTikTokErrorCode(providerResponse)
+    if (code) {
+      throw new PlatformAdapterError(platform, code, `${platform} provider request failed`, response.status, providerResponse)
+    }
+  }
+  return providerResponse
 }
 
 export function asRecord(value: unknown): Record<string, unknown> {

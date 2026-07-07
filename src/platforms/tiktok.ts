@@ -20,8 +20,7 @@ function tokenSetFromResponse(response: Record<string, unknown>): TokenSet {
 }
 
 function creatorInfoFromResponse(response: Record<string, unknown>): Record<string, unknown> {
-  const data = asRecord(response.data)
-  return asRecord(data.creator_info)
+  return asRecord(response.data)
 }
 
 function privacyLevelForV1(creatorInfo: Record<string, unknown>): string {
