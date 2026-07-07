@@ -1,4 +1,4 @@
-import { asRecord, expectProviderOk } from './adapter'
+import { PlatformAdapterError, asRecord, expectProviderOk, fetchVideoBytes } from './adapter'
 import type { PlatformAdapter, PublishResult, TokenSet } from './adapter'
 
 type YouTubeConfig = {
@@ -70,20 +70,41 @@ export function createYouTubeAdapter(config: YouTubeConfig): PlatformAdapter {
       const snippet = asRecord(channel.snippet)
       return { id: String(channel.id ?? ''), name: String(snippet.title ?? 'YouTube channel'), metadata: body }
     },
-    async publishVideo({ accessToken, caption }): Promise<PublishResult> {
-      const response = await fetch(
+    async publishVideo({ accessToken, videoUrl, caption }): Promise<PublishResult> {
+      const video = await fetchVideoBytes('youtube', videoUrl)
+      const metadataResponse = await fetch(
         'https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status',
         {
           method: 'POST',
-          headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
+          headers: {
+            authorization: `Bearer ${accessToken}`,
+            'content-type': 'application/json',
+            'x-upload-content-type': video.contentType,
+            'x-upload-content-length': String(video.bytes.byteLength),
+          },
           body: JSON.stringify({
             snippet: { title: caption.slice(0, 100) || 'Divine video', description: caption },
             status: { privacyStatus: 'private', selfDeclaredMadeForKids: false },
           }),
         },
       )
-      const body = asRecord(await expectProviderOk('youtube', response))
-      return { status: 'processing', externalPostId: String(body.id ?? ''), providerResponse: body }
+      await expectProviderOk('youtube', metadataResponse)
+      const uploadUrl = metadataResponse.headers.get('location')
+      if (!uploadUrl) {
+        throw new PlatformAdapterError('youtube', 'unknown_platform_error', 'missing YouTube upload session')
+      }
+
+      const uploadResponse = await fetch(uploadUrl, {
+        method: 'PUT',
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          'content-type': video.contentType,
+          'content-length': String(video.bytes.byteLength),
+        },
+        body: video.bytes,
+      })
+      const body = asRecord(await expectProviderOk('youtube', uploadResponse))
+      return { status: 'posted', externalPostId: String(body.id ?? ''), providerResponse: body }
     },
   }
 }

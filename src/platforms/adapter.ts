@@ -101,3 +101,14 @@ export async function expectProviderOk(platform: Platform, response: Response): 
 export function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
 }
+
+export async function fetchVideoBytes(platform: Platform, videoUrl: string): Promise<{ bytes: ArrayBuffer; contentType: string }> {
+  const response = await fetch(videoUrl)
+  if (!response.ok) {
+    throw new PlatformAdapterError(platform, 'unknown_platform_error', 'failed to fetch source video', response.status)
+  }
+  return {
+    bytes: await response.arrayBuffer(),
+    contentType: response.headers.get('content-type') ?? 'video/mp4',
+  }
+}

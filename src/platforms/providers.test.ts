@@ -1,5 +1,30 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createInstagramAdapter } from './instagram'
+import { createTikTokAdapter } from './tiktok'
+import { createXAdapter } from './x'
+import { createYouTubeAdapter } from './youtube'
+
+const VIDEO_BYTES = new Uint8Array([1, 2, 3, 4])
+
+function publishInput() {
+  return {
+    accessToken: 'access',
+    externalAccountId: 'account-id',
+    videoUrl: 'https://cdn.divine.video/video.mp4',
+    mediaHash: 'sha256:abc',
+    caption: 'caption',
+  }
+}
+
+function bodyAsParams(call: unknown[]): URLSearchParams {
+  const init = call[1] as RequestInit
+  return init.body as URLSearchParams
+}
+
+async function bodyAsJson(call: unknown[]): Promise<Record<string, unknown>> {
+  const init = call[1] as RequestInit
+  return JSON.parse(String(init.body)) as Record<string, unknown>
+}
 
 describe('provider adapters', () => {
   let fetchMock: ReturnType<typeof vi.fn>
@@ -36,19 +61,154 @@ describe('provider adapters', () => {
       Response.json({ error: { code: 'media_rejected', message: 'media rejected' } }, { status: 400 }),
     )
 
-    await expect(
-      adapter.publishVideo({
-        accessToken: 'access',
-        externalAccountId: 'ig-user',
-        videoUrl: 'https://cdn.divine.video/video.mp4',
-        mediaHash: 'sha256:abc',
-        caption: 'caption',
-      }),
-    ).rejects.toMatchObject({ code: 'media_rejected', providerStatus: 400, platform: 'instagram' })
+    await expect(adapter.publishVideo(publishInput())).rejects.toMatchObject({
+      code: 'media_rejected',
+      providerStatus: 400,
+      platform: 'instagram',
+    })
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://graph.facebook.com/v20.0/ig-user/media',
+      'https://graph.facebook.com/v20.0/account-id/media',
       expect.objectContaining({ method: 'POST' }),
+    )
+  })
+
+  it('creates an Instagram container, checks status, and waits when not ready', async () => {
+    const adapter = createInstagramAdapter({ clientId: 'client', clientSecret: 'secret' })
+    fetchMock
+      .mockResolvedValueOnce(Response.json({ id: 'container-id' }))
+      .mockResolvedValueOnce(Response.json({ status_code: 'IN_PROGRESS' }))
+
+    await expect(adapter.publishVideo(publishInput())).resolves.toMatchObject({
+      status: 'processing',
+      externalPostId: 'container-id',
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      'https://graph.facebook.com/v20.0/account-id/media',
+      expect.objectContaining({ method: 'POST' }),
+    )
+    expect(String(fetchMock.mock.calls[1][0])).toContain('https://graph.facebook.com/v20.0/container-id')
+    expect(String(fetchMock.mock.calls[1][0])).toContain('fields=status_code')
+  })
+
+  it('publishes an Instagram container only after status is ready', async () => {
+    const adapter = createInstagramAdapter({ clientId: 'client', clientSecret: 'secret' })
+    fetchMock
+      .mockResolvedValueOnce(Response.json({ id: 'container-id' }))
+      .mockResolvedValueOnce(Response.json({ status_code: 'FINISHED' }))
+      .mockResolvedValueOnce(Response.json({ id: 'ig-post-id' }))
+
+    await expect(adapter.publishVideo(publishInput())).resolves.toMatchObject({
+      status: 'posted',
+      externalPostId: 'ig-post-id',
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      'https://graph.facebook.com/v20.0/account-id/media_publish',
+      expect.objectContaining({ method: 'POST' }),
+    )
+  })
+
+  it('starts TikTok direct post with pull-from-url source info', async () => {
+    const adapter = createTikTokAdapter({ clientKey: 'client', clientSecret: 'secret' })
+    fetchMock.mockResolvedValueOnce(Response.json({ publish_id: 'publish-id' }))
+
+    await expect(adapter.publishVideo(publishInput())).resolves.toMatchObject({
+      status: 'processing',
+      externalPostId: 'publish-id',
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://open.tiktokapis.com/v2/post/publish/video/init/',
+      expect.objectContaining({
+        method: 'POST',
+        headers: { authorization: 'Bearer access', 'content-type': 'application/json' },
+      }),
+    )
+    await expect(bodyAsJson(fetchMock.mock.calls[0])).resolves.toMatchObject({
+      source_info: { source: 'PULL_FROM_URL', video_url: 'https://cdn.divine.video/video.mp4' },
+      post_info: { title: 'caption' },
+    })
+  })
+
+  it('uploads X video bytes with INIT, APPEND, FINALIZE, then creates a post', async () => {
+    const adapter = createXAdapter({ clientId: 'client', clientSecret: 'secret' })
+    fetchMock
+      .mockResolvedValueOnce(new Response(VIDEO_BYTES))
+      .mockResolvedValueOnce(Response.json({ media_id_string: 'media-id' }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(Response.json({ media_id_string: 'media-id' }))
+      .mockResolvedValueOnce(Response.json({ data: { id: 'tweet-id' } }))
+
+    await expect(adapter.publishVideo(publishInput())).resolves.toMatchObject({
+      status: 'posted',
+      externalPostId: 'tweet-id',
+    })
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, 'https://cdn.divine.video/video.mp4')
+    expect(String(fetchMock.mock.calls[1][0])).toBe('https://upload.twitter.com/1.1/media/upload.json')
+    expect(bodyAsParams(fetchMock.mock.calls[1]).get('command')).toBe('INIT')
+    expect(bodyAsParams(fetchMock.mock.calls[1]).get('total_bytes')).toBe(String(VIDEO_BYTES.byteLength))
+    expect(bodyAsParams(fetchMock.mock.calls[2]).get('command')).toBe('APPEND')
+    expect(bodyAsParams(fetchMock.mock.calls[2]).get('media_id')).toBe('media-id')
+    expect(bodyAsParams(fetchMock.mock.calls[3]).get('command')).toBe('FINALIZE')
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      5,
+      'https://api.x.com/2/tweets',
+      expect.objectContaining({ method: 'POST' }),
+    )
+    await expect(bodyAsJson(fetchMock.mock.calls[4])).resolves.toMatchObject({
+      text: 'caption',
+      media: { media_ids: ['media-id'] },
+    })
+  })
+
+  it('uploads YouTube through resumable metadata start and media upload calls', async () => {
+    const adapter = createYouTubeAdapter({ clientId: 'client', clientSecret: 'secret' })
+    fetchMock
+      .mockResolvedValueOnce(new Response(VIDEO_BYTES))
+      .mockResolvedValueOnce(new Response(null, { status: 200, headers: { location: 'https://upload.youtube/session' } }))
+      .mockResolvedValueOnce(Response.json({ id: 'youtube-id' }))
+
+    await expect(adapter.publishVideo(publishInput())).resolves.toMatchObject({
+      status: 'posted',
+      externalPostId: 'youtube-id',
+    })
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, 'https://cdn.divine.video/video.mp4')
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      'https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          authorization: 'Bearer access',
+          'content-type': 'application/json',
+          'x-upload-content-type': 'video/mp4',
+          'x-upload-content-length': String(VIDEO_BYTES.byteLength),
+        }),
+      }),
+    )
+    await expect(bodyAsJson(fetchMock.mock.calls[1])).resolves.toMatchObject({
+      snippet: { title: 'caption', description: 'caption' },
+      status: { privacyStatus: 'private' },
+    })
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      'https://upload.youtube/session',
+      expect.objectContaining({
+        method: 'PUT',
+        headers: expect.objectContaining({
+          authorization: 'Bearer access',
+          'content-type': 'video/mp4',
+          'content-length': String(VIDEO_BYTES.byteLength),
+        }),
+      }),
     )
   })
 })

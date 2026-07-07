@@ -1,4 +1,4 @@
-import { asRecord, expectProviderOk } from './adapter'
+import { asRecord, expectProviderOk, fetchVideoBytes } from './adapter'
 import type { PlatformAdapter, PublishResult, TokenSet } from './adapter'
 
 type XConfig = {
@@ -9,6 +9,15 @@ type XConfig = {
 const API_BASE = 'https://api.x.com/2'
 const UPLOAD_BASE = 'https://upload.twitter.com/1.1/media/upload.json'
 const SCOPES = 'tweet.read tweet.write users.read media.write offline.access'
+
+function bytesToBase64(bytes: ArrayBuffer): string {
+  const view = new Uint8Array(bytes)
+  let binary = ''
+  for (let index = 0; index < view.length; index += 0x8000) {
+    binary += String.fromCharCode(...view.slice(index, index + 0x8000))
+  }
+  return btoa(binary)
+}
 
 function tokenSetFromResponse(response: Record<string, unknown>): TokenSet {
   const expiresIn = typeof response.expires_in === 'number' ? response.expires_in : undefined
@@ -66,17 +75,47 @@ export function createXAdapter(config: XConfig): PlatformAdapter {
       const data = asRecord(body.data)
       return { id: String(data.id ?? ''), name: String(data.username ?? data.name ?? 'X account'), metadata: body }
     },
-    async publishVideo({ accessToken, caption }): Promise<PublishResult> {
+    async publishVideo({ accessToken, videoUrl, caption }): Promise<PublishResult> {
+      const video = await fetchVideoBytes('x', videoUrl)
       const init = asRecord(
         await expectProviderOk(
           'x',
-          await fetch(`${UPLOAD_BASE}?command=INIT&media_type=video/mp4&media_category=tweet_video`, {
+          await fetch(UPLOAD_BASE, {
             method: 'POST',
             headers: { authorization: `Bearer ${accessToken}` },
+            body: new URLSearchParams({
+              command: 'INIT',
+              total_bytes: String(video.bytes.byteLength),
+              media_type: video.contentType,
+              media_category: 'tweet_video',
+            }),
           }),
         ),
       )
       const mediaId = String(init.media_id_string ?? init.media_id ?? '')
+      await expectProviderOk(
+        'x',
+        await fetch(UPLOAD_BASE, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${accessToken}` },
+          body: new URLSearchParams({
+            command: 'APPEND',
+            media_id: mediaId,
+            segment_index: '0',
+            media_data: bytesToBase64(video.bytes),
+          }),
+        }),
+      )
+      const finalize = asRecord(
+        await expectProviderOk(
+          'x',
+          await fetch(UPLOAD_BASE, {
+            method: 'POST',
+            headers: { authorization: `Bearer ${accessToken}` },
+            body: new URLSearchParams({ command: 'FINALIZE', media_id: mediaId }),
+          }),
+        ),
+      )
       const tweet = asRecord(
         await expectProviderOk(
           'x',
@@ -88,7 +127,7 @@ export function createXAdapter(config: XConfig): PlatformAdapter {
         ),
       )
       const data = asRecord(tweet.data)
-      return { status: 'posted', externalPostId: String(data.id ?? ''), providerResponse: { init, tweet } }
+      return { status: 'posted', externalPostId: String(data.id ?? ''), providerResponse: { init, finalize, tweet } }
     },
   }
 }

@@ -79,6 +79,19 @@ export function createInstagramAdapter(config: InstagramConfig): PlatformAdapter
         ),
       )
       const creationId = String(container.id ?? '')
+      const statusUrl = new URL(`${GRAPH_BASE}/${creationId}`)
+      statusUrl.searchParams.set('fields', 'status_code')
+      statusUrl.searchParams.set('access_token', input.accessToken)
+      const status = asRecord(await expectProviderOk('instagram', await fetch(statusUrl.toString())))
+
+      if (status.status_code !== 'FINISHED') {
+        return {
+          status: 'processing',
+          externalPostId: creationId,
+          providerResponse: { container, status },
+        }
+      }
+
       const publishBody = new URLSearchParams({ creation_id: creationId, access_token: input.accessToken })
       const published = asRecord(
         await expectProviderOk(
