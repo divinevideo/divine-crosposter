@@ -1,0 +1,167 @@
+import { asRecord, expectProviderOk } from './adapter'
+import type { PlatformAccount, PlatformAdapter, PublishInput, PublishResult, TokenSet } from './adapter'
+
+type InstagramConfig = {
+  clientId: string
+  clientSecret: string
+}
+
+const GRAPH_BASE = 'https://graph.facebook.com/v20.0'
+
+function tokenSetFromResponse(response: Record<string, unknown>): TokenSet {
+  const expiresIn = typeof response.expires_in === 'number' ? response.expires_in : undefined
+  return {
+    accessToken: String(response.access_token ?? ''),
+    refreshToken: typeof response.refresh_token === 'string' ? response.refresh_token : undefined,
+    expiresAt: expiresIn ? Math.floor(Date.now() / 1000) + expiresIn : undefined,
+    scopes: typeof response.scope === 'string' ? response.scope.split(',').map((scope) => scope.trim()) : [],
+    metadata: response,
+  }
+}
+
+function instagramCreationId(providerResponse: Record<string, unknown>): string {
+  const container = asRecord(providerResponse.container)
+  return String(providerResponse.creationId ?? providerResponse.id ?? providerResponse.creation_id ?? container.id ?? '')
+}
+
+function instagramExternalAccountId(providerResponse: Record<string, unknown>): string {
+  return String(providerResponse.externalAccountId ?? providerResponse.external_account_id ?? '')
+}
+
+async function postForm(url: string, body: URLSearchParams): Promise<Record<string, unknown>> {
+  const response = await fetch(url, { method: 'POST', body })
+  return asRecord(await expectProviderOk('instagram', response))
+}
+
+export function createInstagramAdapter(config: InstagramConfig): PlatformAdapter {
+  return {
+    platform: 'instagram',
+    buildAuthorizationUrl({ state, redirectUri }) {
+      const url = new URL('https://www.facebook.com/v20.0/dialog/oauth')
+      url.searchParams.set('client_id', config.clientId)
+      url.searchParams.set('redirect_uri', redirectUri)
+      url.searchParams.set('state', state)
+      url.searchParams.set('response_type', 'code')
+      url.searchParams.set('scope', 'instagram_basic,instagram_content_publish,pages_show_list,pages_read_engagement')
+      return url.toString()
+    },
+    async exchangeCallback({ code, redirectUri }) {
+      const body = new URLSearchParams({
+        client_id: config.clientId,
+        client_secret: config.clientSecret,
+        redirect_uri: redirectUri,
+        code,
+        grant_type: 'authorization_code',
+      })
+      return tokenSetFromResponse(await postForm(`${GRAPH_BASE}/oauth/access_token`, body))
+    },
+    async refreshToken({ refreshToken }) {
+      const url = new URL(`${GRAPH_BASE}/refresh_access_token`)
+      url.searchParams.set('grant_type', 'ig_refresh_token')
+      url.searchParams.set('access_token', refreshToken)
+      const response = await fetch(url.toString())
+      return tokenSetFromResponse(asRecord(await expectProviderOk('instagram', response)))
+    },
+    async fetchAccount({ accessToken }) {
+      const url = new URL(`${GRAPH_BASE}/me/accounts`)
+      url.searchParams.set('fields', 'id,name,instagram_business_account{id,username}')
+      url.searchParams.set('access_token', accessToken)
+      const body = asRecord(await expectProviderOk('instagram', await fetch(url.toString())))
+      const accounts = Array.isArray(body.data) ? body.data : []
+      const account = asRecord(accounts[0])
+      const instagramBusinessAccount = asRecord(account.instagram_business_account)
+      const instagramAccountId = String(instagramBusinessAccount.id ?? '')
+      const pageId = String(account.id ?? '')
+      return {
+        id: instagramAccountId,
+        name: String(instagramBusinessAccount.username ?? account.name ?? 'Instagram account'),
+        metadata: { ...body, pageId, page: account, instagramBusinessAccount },
+      }
+    },
+    async publishVideo(input: PublishInput): Promise<PublishResult> {
+      const createBody = new URLSearchParams({
+        media_type: 'REELS',
+        video_url: input.videoUrl,
+        caption: input.caption,
+        access_token: input.accessToken,
+      })
+      const container = asRecord(
+        await expectProviderOk(
+          'instagram',
+          await fetch(`${GRAPH_BASE}/${input.externalAccountId}/media`, { method: 'POST', body: createBody }),
+        ),
+      )
+      const creationId = String(container.id ?? '')
+      const statusUrl = new URL(`${GRAPH_BASE}/${creationId}`)
+      statusUrl.searchParams.set('fields', 'status_code')
+      statusUrl.searchParams.set('access_token', input.accessToken)
+      const status = asRecord(await expectProviderOk('instagram', await fetch(statusUrl.toString())))
+
+      if (status.status_code !== 'FINISHED') {
+        return {
+          status: 'processing',
+          externalPostId: creationId,
+          providerResponse: {
+            id: creationId,
+            creationId,
+            externalAccountId: input.externalAccountId,
+            container,
+            status,
+          },
+        }
+      }
+
+      const publishBody = new URLSearchParams({ creation_id: creationId, access_token: input.accessToken })
+      const published = asRecord(
+        await expectProviderOk(
+          'instagram',
+          await fetch(`${GRAPH_BASE}/${input.externalAccountId}/media_publish`, { method: 'POST', body: publishBody }),
+        ),
+      )
+      const externalPostId = String(published.id ?? creationId)
+      return {
+        status: 'posted',
+        externalPostId,
+        externalPostUrl: typeof published.permalink === 'string' ? published.permalink : undefined,
+        providerResponse: {
+          id: creationId,
+          creationId,
+          externalAccountId: input.externalAccountId,
+          container,
+          status,
+          published,
+        },
+      }
+    },
+    async pollPublishStatus({ accessToken, providerResponse }) {
+      const creationId = instagramCreationId(providerResponse)
+      const url = new URL(`${GRAPH_BASE}/${creationId}`)
+      url.searchParams.set('fields', 'status_code')
+      url.searchParams.set('access_token', accessToken)
+      const status = asRecord(await expectProviderOk('instagram', await fetch(url.toString())))
+      if (status.status_code !== 'FINISHED') {
+        return {
+          status: 'processing',
+          externalPostId: creationId,
+          providerResponse: { ...providerResponse, id: creationId, creationId, status },
+        }
+      }
+
+      const externalAccountId = instagramExternalAccountId(providerResponse)
+      const publishBody = new URLSearchParams({ creation_id: creationId, access_token: accessToken })
+      const published = asRecord(
+        await expectProviderOk(
+          'instagram',
+          await fetch(`${GRAPH_BASE}/${externalAccountId}/media_publish`, { method: 'POST', body: publishBody }),
+        ),
+      )
+      const externalPostId = String(published.id ?? creationId)
+      return {
+        status: 'posted',
+        externalPostId,
+        externalPostUrl: typeof published.permalink === 'string' ? published.permalink : undefined,
+        providerResponse: { ...providerResponse, id: creationId, creationId, status, published },
+      }
+    },
+  }
+}

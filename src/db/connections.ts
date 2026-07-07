@@ -1,0 +1,150 @@
+import { allPrepared, changes, firstPrepared, runPrepared } from './client'
+import type { ConnectionRecord, ConnectionStatus, Platform } from '../types'
+
+type ConnectionRow = {
+  id: string
+  pubkey: string
+  platform: Platform
+  external_account_id: string
+  external_account_name: string
+  encrypted_access_token: string
+  encrypted_refresh_token: string | null
+  token_expires_at: number | null
+  granted_scopes: string
+  status: ConnectionStatus
+  created_at: number
+  updated_at: number
+  last_refresh_at: number | null
+  metadata_json: string
+}
+
+function mapConnection(row: ConnectionRow): ConnectionRecord {
+  return {
+    id: row.id,
+    pubkey: row.pubkey,
+    platform: row.platform,
+    externalAccountId: row.external_account_id,
+    externalAccountName: row.external_account_name,
+    encryptedAccessToken: row.encrypted_access_token,
+    encryptedRefreshToken: row.encrypted_refresh_token,
+    tokenExpiresAt: row.token_expires_at,
+    grantedScopes: row.granted_scopes,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastRefreshAt: row.last_refresh_at,
+    metadataJson: row.metadata_json,
+  }
+}
+
+async function getById(db: D1Database, id: string): Promise<ConnectionRecord | null> {
+  const row = await firstPrepared<ConnectionRow>(db, 'SELECT * FROM connections WHERE id = ?', id)
+  return row ? mapConnection(row) : null
+}
+
+export async function upsertConnection(db: D1Database, input: ConnectionRecord): Promise<ConnectionRecord> {
+  await runPrepared(
+    db,
+    `INSERT INTO connections (
+      id, pubkey, platform, external_account_id, external_account_name,
+      encrypted_access_token, encrypted_refresh_token, token_expires_at,
+      granted_scopes, status, created_at, updated_at, last_refresh_at, metadata_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(pubkey, platform, external_account_id) DO UPDATE SET
+      external_account_name = excluded.external_account_name,
+      encrypted_access_token = excluded.encrypted_access_token,
+      encrypted_refresh_token = excluded.encrypted_refresh_token,
+      token_expires_at = excluded.token_expires_at,
+      granted_scopes = excluded.granted_scopes,
+      status = excluded.status,
+      updated_at = excluded.updated_at,
+      last_refresh_at = excluded.last_refresh_at,
+      metadata_json = excluded.metadata_json`,
+    input.id,
+    input.pubkey,
+    input.platform,
+    input.externalAccountId,
+    input.externalAccountName,
+    input.encryptedAccessToken,
+    input.encryptedRefreshToken,
+    input.tokenExpiresAt,
+    input.grantedScopes,
+    input.status,
+    input.createdAt,
+    input.updatedAt,
+    input.lastRefreshAt,
+    input.metadataJson,
+  )
+
+  const row = await firstPrepared<ConnectionRow>(
+    db,
+    'SELECT * FROM connections WHERE pubkey = ? AND platform = ? AND external_account_id = ?',
+    input.pubkey,
+    input.platform,
+    input.externalAccountId,
+  )
+  if (!row) {
+    throw new Error('failed to upsert connection')
+  }
+  return mapConnection(row)
+}
+
+export async function listConnections(db: D1Database, pubkey: string): Promise<ConnectionRecord[]> {
+  const rows = await allPrepared<ConnectionRow>(
+    db,
+    'SELECT * FROM connections WHERE pubkey = ? ORDER BY created_at ASC, id ASC',
+    pubkey,
+  )
+  return rows.map(mapConnection)
+}
+
+export async function getConnection(
+  db: D1Database,
+  id: string,
+  pubkey: string,
+): Promise<ConnectionRecord | null> {
+  const row = await firstPrepared<ConnectionRow>(
+    db,
+    'SELECT * FROM connections WHERE id = ? AND pubkey = ?',
+    id,
+    pubkey,
+  )
+  return row ? mapConnection(row) : null
+}
+
+export async function getActiveConnectionForPlatform(
+  db: D1Database,
+  pubkey: string,
+  platform: Platform,
+): Promise<ConnectionRecord | null> {
+  const row = await firstPrepared<ConnectionRow>(
+    db,
+    `SELECT * FROM connections
+    WHERE pubkey = ? AND platform = ? AND status = 'connected'
+    ORDER BY updated_at DESC, created_at DESC
+    LIMIT 1`,
+    pubkey,
+    platform,
+  )
+  return row ? mapConnection(row) : null
+}
+
+export async function markConnectionNeedsReauth(db: D1Database, id: string, now: number): Promise<void> {
+  await runPrepared(db, "UPDATE connections SET status = 'needs_reauth', updated_at = ? WHERE id = ?", now, id)
+}
+
+export async function disconnectConnection(
+  db: D1Database,
+  id: string,
+  pubkey: string,
+  now: number,
+): Promise<boolean> {
+  const result = await runPrepared(
+    db,
+    "UPDATE connections SET status = 'disconnected', updated_at = ? WHERE id = ? AND pubkey = ?",
+    now,
+    id,
+    pubkey,
+  )
+  return changes(result) > 0 && (await getById(db, id)) !== null
+}
