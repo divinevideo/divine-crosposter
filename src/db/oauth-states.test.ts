@@ -52,4 +52,57 @@ describe('oauth state repository', () => {
     await expect(consumeOAuthState(db, 'state_expired', 1_101)).resolves.toBeNull()
     await expect(deleteExpiredOAuthStates(db, 1_101)).resolves.toBe(1)
   })
+
+  it('uses atomic delete-returning semantics so concurrent consumes only return one state', async () => {
+    const row = {
+      state_id: 'state_atomic',
+      pubkey: PUBKEY_A,
+      platform: 'youtube',
+      code_verifier: 'verifier',
+      return_url: 'https://divine.video/settings/crossposting',
+      created_at: 1_000,
+      expires_at: 2_000,
+      metadata_json: '{}',
+    }
+    let deleted = false
+    const atomicDb = {
+      prepare(query: string) {
+        if (!query.includes('DELETE FROM oauth_states') || !query.includes('RETURNING')) {
+          throw new Error('oauth state consumption must be a single atomic DELETE RETURNING query')
+        }
+
+        return {
+          bind() {
+            return {
+              async first() {
+                if (deleted) {
+                  return null
+                }
+                deleted = true
+                return row
+              },
+            }
+          },
+        }
+      },
+    } as unknown as D1Database
+
+    const [first, second] = await Promise.all([
+      consumeOAuthState(atomicDb, 'state_atomic', 1_500),
+      consumeOAuthState(atomicDb, 'state_atomic', 1_500),
+    ])
+
+    expect([first, second].filter(Boolean)).toHaveLength(1)
+    expect([first, second]).toContainEqual({
+      stateId: 'state_atomic',
+      pubkey: PUBKEY_A,
+      platform: 'youtube',
+      codeVerifier: 'verifier',
+      returnUrl: 'https://divine.video/settings/crossposting',
+      createdAt: 1_000,
+      expiresAt: 2_000,
+      metadataJson: '{}',
+    })
+    expect([first, second]).toContain(null)
+  })
 })

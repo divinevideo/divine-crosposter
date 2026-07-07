@@ -1,6 +1,6 @@
 name = "divine-crossposter"
 main = "src/index.ts"
-compatibility_date = "2026-07-07"
+compatibility_date = "2025-09-06"
 
 [vars]
 KEYCAST_URL = "https://login.divine.video"

@@ -49,16 +49,13 @@ export async function consumeOAuthState(
 ): Promise<OAuthStateRecord | null> {
   const row = await firstPrepared<OAuthStateRow>(
     db,
-    'SELECT * FROM oauth_states WHERE state_id = ? AND expires_at >= ?',
+    `DELETE FROM oauth_states
+    WHERE state_id = ? AND expires_at >= ?
+    RETURNING *`,
     stateId,
     now,
   )
-  if (!row) {
-    return null
-  }
-
-  await runPrepared(db, 'DELETE FROM oauth_states WHERE state_id = ?', stateId)
-  return mapOAuthState(row)
+  return row ? mapOAuthState(row) : null
 }
 
 export async function deleteExpiredOAuthStates(db: D1Database, now: number): Promise<number> {

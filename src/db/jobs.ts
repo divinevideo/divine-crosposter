@@ -1,4 +1,4 @@
-import { allPrepared, firstPrepared, runPrepared } from './client'
+import { allPrepared, changes, firstPrepared, runPrepared } from './client'
 import type { CreateJobInput, ErrorCode, JobRecord, JobStatus, Platform, UpdateJobStatusInput } from '../types'
 
 type JobRow = {
@@ -69,9 +69,9 @@ export async function createOrGetJob(
     return { job: existing, created: false }
   }
 
-  await runPrepared(
+  const result = await runPrepared(
     db,
-    `INSERT INTO jobs (
+    `INSERT OR IGNORE INTO jobs (
       id, pubkey, video_event_id, platform, connection_id, external_account_id,
       source_media_url, source_media_hash, caption, status, error_code, error_message,
       external_post_id, external_post_url, retry_count, next_retry_at, expires_at,
@@ -98,11 +98,11 @@ export async function createOrGetJob(
     input.updatedAt,
   )
 
-  const created = await getJob(db, input.id)
-  if (!created) {
-    throw new Error('failed to create job')
+  const job = changes(result) > 0 ? await getJob(db, input.id) : await findByIdempotencyKey(db, input)
+  if (!job) {
+    throw new Error('failed to create or find job')
   }
-  return { job: created, created: true }
+  return { job, created: changes(result) > 0 }
 }
 
 export async function listJobsForVideo(
@@ -129,28 +129,31 @@ export async function getJob(db: D1Database, id: string, pubkey?: string): Promi
 }
 
 export async function updateJobStatus(db: D1Database, input: UpdateJobStatusInput): Promise<void> {
-  await runPrepared(
-    db,
-    `UPDATE jobs SET
-      status = ?,
-      updated_at = ?,
-      error_code = COALESCE(?, error_code),
-      error_message = COALESCE(?, error_message),
-      external_post_id = COALESCE(?, external_post_id),
-      external_post_url = COALESCE(?, external_post_url),
-      retry_count = COALESCE(?, retry_count),
-      next_retry_at = ?
-    WHERE id = ?`,
-    input.status,
-    input.updatedAt,
-    input.errorCode ?? null,
-    input.errorMessage ?? null,
-    input.externalPostId ?? null,
-    input.externalPostUrl ?? null,
-    input.retryCount ?? null,
-    input.nextRetryAt ?? null,
-    input.id,
-  )
+  const assignments = ['status = ?', 'updated_at = ?']
+  const bindings: unknown[] = [input.status, input.updatedAt]
+
+  const nullableFields = [
+    ['errorCode', 'error_code'],
+    ['errorMessage', 'error_message'],
+    ['externalPostId', 'external_post_id'],
+    ['externalPostUrl', 'external_post_url'],
+    ['nextRetryAt', 'next_retry_at'],
+  ] as const
+
+  for (const [inputKey, column] of nullableFields) {
+    if (Object.prototype.hasOwnProperty.call(input, inputKey)) {
+      assignments.push(`${column} = ?`)
+      bindings.push(input[inputKey])
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(input, 'retryCount')) {
+    assignments.push('retry_count = ?')
+    bindings.push(input.retryCount)
+  }
+
+  bindings.push(input.id)
+  await runPrepared(db, `UPDATE jobs SET ${assignments.join(', ')} WHERE id = ?`, ...bindings)
 }
 
 export async function listRunnableJobs(db: D1Database, now: number, limit: number): Promise<JobRecord[]> {

@@ -20,6 +20,65 @@ describe('job repository', () => {
     expect(duplicate.job).toMatchObject({ id: 'job_original', caption: 'six seconds of weird human internet' })
   })
 
+  it('returns the existing job when a concurrent duplicate insert wins the race', async () => {
+    const existingRow = {
+      id: 'job_existing',
+      pubkey: PUBKEY_A,
+      video_event_id: VIDEO_EVENT_ID,
+      platform: 'tiktok',
+      connection_id: 'conn_1',
+      external_account_id: 'external-account-1',
+      source_media_url: 'https://cdn.divine.video/video.mp4',
+      source_media_hash: 'sha256:example',
+      caption: 'already inserted by another callback',
+      status: 'queued',
+      error_code: null,
+      error_message: null,
+      external_post_id: null,
+      external_post_url: null,
+      retry_count: 0,
+      next_retry_at: null,
+      expires_at: 174_000,
+      created_at: 1_000,
+      updated_at: 1_000,
+    }
+    let selectCount = 0
+    const racingDb = {
+      prepare(query: string) {
+        return {
+          bind() {
+            return {
+              async first() {
+                if (query.includes('SELECT * FROM jobs')) {
+                  selectCount += 1
+                  return selectCount === 1 ? null : existingRow
+                }
+                return null
+              },
+              async run() {
+                if (query.includes('INSERT OR IGNORE INTO jobs')) {
+                  return { meta: { changes: 0 }, success: true }
+                }
+                if (query.includes('INSERT INTO jobs')) {
+                  throw new Error('UNIQUE constraint failed: jobs.pubkey, jobs.video_event_id, jobs.platform, jobs.external_account_id')
+                }
+                return { meta: { changes: 0 }, success: true }
+              },
+            }
+          },
+        }
+      },
+    } as unknown as D1Database
+
+    await expect(createOrGetJob(racingDb, job({ id: 'job_loser' }))).resolves.toEqual({
+      created: false,
+      job: expect.objectContaining({
+        id: 'job_existing',
+        caption: 'already inserted by another callback',
+      }),
+    })
+  })
+
   it('lists jobs for a video and runnable queued jobs', async () => {
     const { job: created } = await createOrGetJob(db, job({ id: 'job_runnable', nextRetryAt: null }))
 
@@ -47,6 +106,41 @@ describe('job repository', () => {
       status: 'posted',
       externalPostId: 'post_1',
       externalPostUrl: 'https://platform.example/post_1',
+      updatedAt: 2_000,
+    })
+  })
+
+  it('clears stale nullable status fields when callers pass null explicitly', async () => {
+    await createOrGetJob(
+      db,
+      job({
+        id: 'job_clear_fields',
+        status: 'failed',
+        errorCode: 'rate_limited',
+        errorMessage: 'try later',
+        externalPostId: 'stale_post',
+        externalPostUrl: 'https://platform.example/stale_post',
+      }),
+    )
+
+    await updateJobStatus(db, {
+      id: 'job_clear_fields',
+      status: 'queued',
+      updatedAt: 2_000,
+      errorCode: null,
+      errorMessage: null,
+      externalPostId: null,
+      externalPostUrl: null,
+      nextRetryAt: null,
+    })
+
+    await expect(getJob(db, 'job_clear_fields', PUBKEY_A)).resolves.toMatchObject({
+      status: 'queued',
+      errorCode: null,
+      errorMessage: null,
+      externalPostId: null,
+      externalPostUrl: null,
+      nextRetryAt: null,
       updatedAt: 2_000,
     })
   })
