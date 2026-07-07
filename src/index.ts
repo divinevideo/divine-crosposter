@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { connections } from './routes/connections'
+import { crossposts } from './routes/crossposts'
 import { health } from './routes/health'
 import { platforms } from './routes/platforms'
 import { preferences } from './routes/preferences'
@@ -11,6 +12,7 @@ app.route('/', health)
 app.route('/', platforms)
 app.route('/', connections)
 app.route('/', preferences)
+app.route('/', crossposts)
 
 export { app }
 
