@@ -7,7 +7,7 @@ type XConfig = {
 }
 
 const API_BASE = 'https://api.x.com/2'
-const UPLOAD_BASE = 'https://upload.twitter.com/1.1/media/upload.json'
+const UPLOAD_BASE = 'https://api.x.com/2/media/upload'
 const SCOPES = 'tweet.read tweet.write users.read media.write offline.access'
 
 function bytesToBase64(bytes: ArrayBuffer): string {

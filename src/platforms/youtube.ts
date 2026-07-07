@@ -1,9 +1,11 @@
 import { PlatformAdapterError, asRecord, expectProviderOk, fetchVideoBytes } from './adapter'
 import type { PlatformAdapter, PublishResult, TokenSet } from './adapter'
+import type { YouTubePrivacyStatus } from '../config'
 
 type YouTubeConfig = {
   clientId: string
   clientSecret: string
+  defaultPrivacyStatus?: YouTubePrivacyStatus
 }
 
 const SCOPES = ['https://www.googleapis.com/auth/youtube.upload']
@@ -20,6 +22,8 @@ function tokenSetFromResponse(response: Record<string, unknown>): TokenSet {
 }
 
 export function createYouTubeAdapter(config: YouTubeConfig): PlatformAdapter {
+  const defaultPrivacyStatus = config.defaultPrivacyStatus ?? 'private'
+
   return {
     platform: 'youtube',
     buildAuthorizationUrl({ state, redirectUri, codeChallenge }) {
@@ -84,7 +88,7 @@ export function createYouTubeAdapter(config: YouTubeConfig): PlatformAdapter {
           },
           body: JSON.stringify({
             snippet: { title: caption.slice(0, 100) || 'Divine video', description: caption },
-            status: { privacyStatus: 'private', selfDeclaredMadeForKids: false },
+            status: { privacyStatus: defaultPrivacyStatus, selfDeclaredMadeForKids: false },
           }),
         },
       )

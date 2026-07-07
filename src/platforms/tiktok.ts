@@ -121,7 +121,14 @@ export function createTikTokAdapter(config: TikTokConfig): PlatformAdapter {
         method: 'POST',
         headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
         body: JSON.stringify({
-          post_info: { title: caption, privacy_level: privacyLevel, disable_duet: false, disable_comment: false },
+          post_info: {
+            title: caption,
+            privacy_level: privacyLevel,
+            disable_duet: false,
+            disable_comment: false,
+            brand_content_toggle: false,
+            brand_organic_toggle: false,
+          },
           source_info: { source: 'PULL_FROM_URL', video_url: videoUrl },
         }),
       })

@@ -1,9 +1,11 @@
 import { Hono } from 'hono'
 import { health } from './routes/health'
+import { platforms } from './routes/platforms'
 import type { Env } from './types'
 
 const app = new Hono<{ Bindings: Env }>()
 app.route('/', health)
+app.route('/', platforms)
 
 export { app }
 

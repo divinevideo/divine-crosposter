@@ -39,10 +39,17 @@ describe('loadConfig', () => {
     expect(config.funnelcakeUrl).toBe('https://api.divine.video')
     expect(config.oauthRedirectBase).toBe('https://crossposter.divine.video/oauth')
     expect(config.features).toMatchObject({ instagram: false, tiktok: true, x: false, youtube: false })
+    expect(config.youtubeDefaultPrivacyStatus).toBe('private')
+  })
+
+  it('parses YouTube default privacy status', () => {
+    expect(loadConfig(env({ YOUTUBE_DEFAULT_PRIVACY_STATUS: 'public' })).youtubeDefaultPrivacyStatus).toBe('public')
+    expect(loadConfig(env({ YOUTUBE_DEFAULT_PRIVACY_STATUS: 'unlisted' })).youtubeDefaultPrivacyStatus).toBe('unlisted')
   })
 
   it('requires required URLs and sufficiently long token encryption key material', () => {
     expectThrowStatus(() => loadConfig(env({ KEYCAST_URL: '' })), 500)
     expectThrowStatus(() => loadConfig(env({ TOKEN_ENCRYPTION_KEY: 'short' })), 500)
+    expectThrowStatus(() => loadConfig(env({ YOUTUBE_DEFAULT_PRIVACY_STATUS: 'friends' })), 500)
   })
 })

@@ -227,7 +227,7 @@ describe('provider adapters', () => {
     )
     await expect(bodyAsJson(fetchMock.mock.calls[1])).resolves.toMatchObject({
       source_info: { source: 'PULL_FROM_URL', video_url: 'https://cdn.divine.video/video.mp4' },
-      post_info: { title: 'caption' },
+      post_info: { title: 'caption', brand_content_toggle: false, brand_organic_toggle: false },
     })
   })
 
@@ -290,7 +290,7 @@ describe('provider adapters', () => {
     })
 
     expect(fetchMock).toHaveBeenNthCalledWith(1, 'https://cdn.divine.video/video.mp4')
-    expect(String(fetchMock.mock.calls[1][0])).toBe('https://upload.twitter.com/1.1/media/upload.json')
+    expect(String(fetchMock.mock.calls[1][0])).toBe('https://api.x.com/2/media/upload')
     expect(bodyAsParams(fetchMock.mock.calls[1]).get('command')).toBe('INIT')
     expect(bodyAsParams(fetchMock.mock.calls[1]).get('total_bytes')).toBe(String(VIDEO_BYTES.byteLength))
     expect(bodyAsParams(fetchMock.mock.calls[2]).get('command')).toBe('APPEND')
@@ -308,7 +308,7 @@ describe('provider adapters', () => {
   })
 
   it('uploads YouTube through resumable metadata start and media upload calls', async () => {
-    const adapter = createYouTubeAdapter({ clientId: 'client', clientSecret: 'secret' })
+    const adapter = createYouTubeAdapter({ clientId: 'client', clientSecret: 'secret', defaultPrivacyStatus: 'unlisted' })
     fetchMock
       .mockResolvedValueOnce(new Response(VIDEO_BYTES))
       .mockResolvedValueOnce(new Response(null, { status: 200, headers: { location: 'https://upload.youtube/session' } }))
@@ -335,7 +335,7 @@ describe('provider adapters', () => {
     )
     await expect(bodyAsJson(fetchMock.mock.calls[1])).resolves.toMatchObject({
       snippet: { title: 'caption', description: 'caption' },
-      status: { privacyStatus: 'private' },
+      status: { privacyStatus: 'unlisted' },
     })
     expect(fetchMock).toHaveBeenNthCalledWith(
       3,
@@ -349,5 +349,19 @@ describe('provider adapters', () => {
         }),
       }),
     )
+  })
+
+  it('uses private YouTube privacy by default', async () => {
+    const adapter = createYouTubeAdapter({ clientId: 'client', clientSecret: 'secret' })
+    fetchMock
+      .mockResolvedValueOnce(new Response(VIDEO_BYTES))
+      .mockResolvedValueOnce(new Response(null, { status: 200, headers: { location: 'https://upload.youtube/session' } }))
+      .mockResolvedValueOnce(Response.json({ id: 'youtube-id' }))
+
+    await adapter.publishVideo(publishInput())
+
+    await expect(bodyAsJson(fetchMock.mock.calls[1])).resolves.toMatchObject({
+      status: { privacyStatus: 'private' },
+    })
   })
 })

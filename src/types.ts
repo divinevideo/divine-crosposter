@@ -40,6 +40,7 @@ export type Env = {
   ENABLE_TIKTOK?: string
   ENABLE_X?: string
   ENABLE_YOUTUBE?: string
+  YOUTUBE_DEFAULT_PRIVACY_STATUS?: string
 }
 
 export type OAuthStateRecord = {

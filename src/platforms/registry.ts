@@ -1,4 +1,5 @@
 import type { Env, Platform } from '../types'
+import { loadConfig } from '../config'
 import type { PlatformAdapter } from './adapter'
 import { createInstagramAdapter } from './instagram'
 import { createTikTokAdapter } from './tiktok'
@@ -48,6 +49,7 @@ function isConfigured(env: Env, platform: Platform): boolean {
 
 export function getEnabledAdapters(env: Env): PlatformAdapter[] {
   const adapters: PlatformAdapter[] = []
+  const config = loadConfig(env)
   const {
     INSTAGRAM_CLIENT_ID,
     INSTAGRAM_CLIENT_SECRET,
@@ -74,7 +76,13 @@ export function getEnabledAdapters(env: Env): PlatformAdapter[] {
     adapters.push(createXAdapter({ clientId: TWITTER_CLIENT_ID, clientSecret: TWITTER_CLIENT_SECRET }))
   }
   if (enabled(env.ENABLE_YOUTUBE) && GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET) {
-    adapters.push(createYouTubeAdapter({ clientId: GOOGLE_CLIENT_ID, clientSecret: GOOGLE_CLIENT_SECRET }))
+    adapters.push(
+      createYouTubeAdapter({
+        clientId: GOOGLE_CLIENT_ID,
+        clientSecret: GOOGLE_CLIENT_SECRET,
+        defaultPrivacyStatus: config.youtubeDefaultPrivacyStatus,
+      }),
+    )
   }
 
   return adapters
