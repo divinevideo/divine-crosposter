@@ -1,0 +1,25 @@
+{
+  "name": "divine-crossposter",
+  "version": "0.1.0",
+  "description": "Cloudflare Worker service for opt-in Divine video crossposting",
+  "main": "src/index.ts",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "wrangler dev",
+    "dev:scheduled": "wrangler dev --test-scheduled",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest",
+    "test:once": "vitest run"
+  },
+  "dependencies": {
+    "hono": "^4.10.6"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.8.0",
+    "@cloudflare/workers-types": "^4.20251115.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0",
+    "wrangler": "^4.0.0"
+  }
+}

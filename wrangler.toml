@@ -1,0 +1,30 @@
+name = "divine-crossposter"
+main = "src/index.ts"
+compatibility_date = "2026-07-07"
+
+[vars]
+KEYCAST_URL = "https://login.divine.video"
+FUNNELCAKE_URL = "https://api.divine.video"
+OAUTH_REDIRECT_BASE = "https://crossposter.divine.video"
+ENABLE_INSTAGRAM = "false"
+ENABLE_TIKTOK = "false"
+ENABLE_X = "false"
+ENABLE_YOUTUBE = "false"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "divine-crossposter"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[[queues.producers]]
+binding = "CROSSPOST_QUEUE"
+queue = "divine-crossposter-jobs"
+
+[[queues.consumers]]
+queue = "divine-crossposter-jobs"
+max_batch_size = 10
+max_batch_timeout = 30
+
+[triggers]
+crons = ["*/5 * * * *"]
