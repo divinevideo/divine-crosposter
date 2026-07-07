@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { health } from './routes/health'
 import { platforms } from './routes/platforms'
+import { processCrosspostJob, PublisherRetryError } from './services/publisher'
 import type { Env } from './types'
 
 const app = new Hono<{ Bindings: Env }>()
@@ -11,9 +12,22 @@ export { app }
 
 export default {
   fetch: app.fetch,
-  async queue(batch: MessageBatch<{ jobId: string }>, _env: Env, _ctx: ExecutionContext): Promise<void> {
+  async queue(batch: MessageBatch<{ jobId: string }>, env: Env, _ctx: ExecutionContext): Promise<void> {
     for (const message of batch.messages) {
-      message.ack()
+      try {
+        const result = await processCrosspostJob(env, message.body.jobId)
+        if (result.retryDelaySeconds) {
+          message.retry({ delaySeconds: result.retryDelaySeconds })
+        } else {
+          message.ack()
+        }
+      } catch (error) {
+        if (error instanceof PublisherRetryError) {
+          message.retry({ delaySeconds: error.retryDelaySeconds })
+        } else {
+          throw error
+        }
+      }
     }
   },
   async scheduled(_event: ScheduledEvent, _env: Env, _ctx: ExecutionContext): Promise<void> {
