@@ -319,3 +319,7 @@ Disconnect behavior:
 - Queue processing records attempts and moves successful jobs to `posted`.
 - Revoked or expired provider auth marks the connection/job `needs_reauth`.
 - Scheduled reconciliation can be triggered locally with the scheduled test endpoint.
+
+---
+
+Part of [Divine](https://divine.video) — your playground for human creativity · [Brand guidelines](https://github.com/divinevideo/brand-guidelines)
