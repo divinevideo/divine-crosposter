@@ -16,7 +16,7 @@
 - Modify: `src/index.test.ts:17-33`
 - Modify: `src/routes/health.ts:539-541`
 
-- [ ] **Step 1: Write the failing regression test**
+- [x] **Step 1: Write the failing regression test**
 
 Change the root-page assertion to require the dedicated client identity and reject the copied verifier identity:
 
@@ -25,13 +25,13 @@ expect(html).toContain("const KEYCAST_CLIENT_ID = 'Divine Crossposter';")
 expect(html).not.toContain("const KEYCAST_CLIENT_ID = 'Divine Identity Verification';")
 ```
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run: `npm run test:once -- src/index.test.ts`
 
 Expected: FAIL because the rendered page still contains `Divine Identity Verification`.
 
-- [ ] **Step 3: Apply the minimal implementation**
+- [x] **Step 3: Apply the minimal implementation**
 
 Set the embedded OAuth client constant to:
 
@@ -39,7 +39,7 @@ Set the embedded OAuth client constant to:
 const KEYCAST_CLIENT_ID = 'Divine Crossposter';
 ```
 
-- [ ] **Step 4: Run focused and full verification**
+- [x] **Step 4: Run focused and full verification**
 
 Run: `npm run test:once -- src/index.test.ts`
 
@@ -55,7 +55,7 @@ Expected: 106 tests pass and TypeScript exits successfully.
 - Create: `database/migrations/20260710150000_seed_divine_crossposter_client.sql`
 - Modify: `api/tests/registered_clients_migration_test.rs`
 
-- [ ] **Step 1: Write the failing migration test**
+- [x] **Step 1: Write the failing migration test**
 
 Add an integration test that queries tenant 1 for `Divine Crossposter`, expects the exact callback, accepts the exact root URL, and rejects a different path:
 
@@ -95,13 +95,13 @@ async fn migrations_register_divine_crossposter_oauth_client() {
 }
 ```
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `cargo test -p keycast_api --test registered_clients_migration_test migrations_register_divine_crossposter_oauth_client -- --exact`
 
 Expected: FAIL because no migration has registered `Divine Crossposter`. If local PostgreSQL is unavailable, record that environmental blocker and still compile the test with `--no-run`.
 
-- [ ] **Step 3: Add the idempotent seed migration**
+- [x] **Step 3: Add the idempotent seed migration**
 
 Create a tenant-1 seed mirroring the existing invite-admin migration:
 
@@ -128,7 +128,7 @@ SET
     updated_at = NOW();
 ```
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run the focused integration test against local PostgreSQL when available; otherwise compile it with:
 
@@ -143,16 +143,16 @@ Expected: targeted test passes when PostgreSQL is available; compilation and for
 **Files:**
 - Review both task diffs; no new production files.
 
-- [ ] **Step 1: Verify the production authorization tuple read-only**
+- [x] **Step 1: Verify the production authorization tuple read-only**
 
 Request Keycast authorization with `client_id=Divine Crossposter`, `redirect_uri=https://crossposter.divine.video/`, `scope=policy:social`, and PKCE S256.
 
 Expected before registration deployment: HTTP 200 because Keycast intentionally permits unregistered HTTPS clients.
 
-- [ ] **Step 2: Independent spec and quality review**
+- [x] **Step 2: Independent spec and quality review**
 
 Review that Crossposter uses the same client ID for authorize and token exchange, and that Keycast registers the exact trailing-slash callback without broad wildcards or changes to the verifier client.
 
-- [ ] **Step 3: Final verification**
+- [x] **Step 3: Final verification**
 
 Run the complete Crossposter test/typecheck suite plus Keycast targeted compile/test and formatting checks. Report database-dependent verification separately from compiled checks.
