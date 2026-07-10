@@ -537,7 +537,7 @@ function renderHome(env: Env): string {
     <script id="platform-data" type="application/json">${platformData}</script>
     <script>
       const KEYCAST_BASE = 'https://login.divine.video';
-      const KEYCAST_CLIENT_ID = 'Divine Identity Verification';
+      const KEYCAST_CLIENT_ID = 'Divine Crossposter';
       const KEYCAST_SCOPE = 'policy:social';
       const SESSION_KEY = 'divine_crossposter_keycast_session_v1';
       const PKCE_KEY = 'divine_crossposter_pkce_v1';
