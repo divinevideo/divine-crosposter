@@ -29,7 +29,8 @@ describe('health route', () => {
     expect(html).toContain('Sign in with your Divine/Nostr account')
     expect(html).toContain('id="connect-list"')
     expect(html).toContain('id="preference-list"')
-    expect(html).toContain("const KEYCAST_CLIENT_ID = 'Divine Identity Verification';")
+    expect(html).toContain("const KEYCAST_CLIENT_ID = 'Divine Crossposter';")
+    expect(html).not.toContain("const KEYCAST_CLIENT_ID = 'Divine Identity Verification';")
   })
 
   it('returns service health', async () => {
