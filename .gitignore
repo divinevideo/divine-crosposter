@@ -6,3 +6,6 @@ dist/
 .env.*
 coverage/
 *.tsbuildinfo
+.playwright-mcp/
+.superpowers/
+crossposter-root-*.png
