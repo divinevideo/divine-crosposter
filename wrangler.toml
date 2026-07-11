@@ -12,7 +12,7 @@ OAUTH_REDIRECT_BASE = "https://crossposter.divine.video"
 ENABLE_INSTAGRAM = "true"
 INSTAGRAM_CLIENT_ID = "1337820474523664"
 ENABLE_TIKTOK = "false"
-ENABLE_X = "false"
+ENABLE_X = "true"
 ENABLE_YOUTUBE = "false"
 
 [[d1_databases]]
