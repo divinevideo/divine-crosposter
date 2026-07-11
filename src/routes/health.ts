@@ -679,6 +679,14 @@ function renderHome(env: Env): string {
         const box = $('pubkey-box');
         if (box) box.style.display = 'none';
         renderAuthControls();
+        renderConnectRows();
+        renderPreferenceRows();
+      }
+
+      function clearRejectedSession(response) {
+        if (response.status !== 401 && response.status !== 403) return false;
+        clearSession();
+        return true;
       }
 
       function isExpired(nextSession) {
@@ -713,6 +721,7 @@ function renderHome(env: Env): string {
         headers.set('Authorization', 'Bearer ' + active.accessToken);
         if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
         const resp = await fetch(path, { ...init, headers });
+        clearRejectedSession(resp);
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) throw new Error(data.error?.message || data.error?.code || 'Request failed.');
         return data;
@@ -729,6 +738,7 @@ function renderHome(env: Env): string {
           },
           body: JSON.stringify({ method: 'get_public_key', params: [] }),
         });
+        clearRejectedSession(resp);
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok || typeof data.result !== 'string') throw new Error(data.error || 'Could not read your Divine key.');
         return data.result.toLowerCase();

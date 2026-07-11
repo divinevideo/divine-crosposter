@@ -202,6 +202,31 @@ describe('connection routes', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it('removes a stale failure reason from a generic callback failure', async () => {
+    await createOAuthState(db, {
+      stateId: 'state_generic_failure',
+      pubkey: PUBKEY_A,
+      platform: 'tiktok',
+      codeVerifier: 'pkce-verifier',
+      returnUrl: 'https://divine.video/settings/crossposting?reason=provider_denied',
+      createdAt: 1_000,
+      expiresAt: 1_783_383_000,
+      metadataJson: '{}',
+    })
+
+    const response = await app.request(
+      '/connections/tiktok/callback?state=state_generic_failure',
+      {},
+      testEnv(db),
+    )
+
+    expect(response.status).toBe(302)
+    expect(response.headers.get('location')).toBe(
+      'https://divine.video/settings/crossposting?connection=failed&platform=tiktok',
+    )
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('lists connections without encrypted token fields', async () => {
     await upsertConnection(db, connection({ id: 'conn_tiktok' }))
     fetchMock.mockResolvedValueOnce(authResponse())

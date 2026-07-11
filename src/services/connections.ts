@@ -85,6 +85,7 @@ function redirectWithResult(
   const url = new URL(returnUrl)
   url.searchParams.set('connection', result)
   url.searchParams.set('platform', platform)
+  url.searchParams.delete('reason')
   if (reason) {
     url.searchParams.set('reason', reason)
   }

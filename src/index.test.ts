@@ -38,6 +38,8 @@ describe('health route', () => {
     expect(html).toContain('function renderAuthControls()')
     expect(html).toContain("toggleAttribute('hidden', signedIn)")
     expect(html).toContain("$('logout-button').toggleAttribute('hidden', !signedIn)")
+    expect(html).toContain('function clearRejectedSession(response)')
+    expect(html).toContain('clearRejectedSession(resp)')
     expect(html).not.toContain("url.searchParams.set('default_register', 'true')")
   })
 
