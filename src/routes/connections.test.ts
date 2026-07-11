@@ -173,6 +173,60 @@ describe('connection routes', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it('consumes provider-denied callback state and redirects with a safe reason', async () => {
+    await createOAuthState(db, {
+      stateId: 'state_denied',
+      pubkey: PUBKEY_A,
+      platform: 'tiktok',
+      codeVerifier: 'pkce-verifier',
+      returnUrl: 'https://divine.video/settings/crossposting',
+      createdAt: 1_000,
+      expiresAt: 1_783_383_000,
+      metadataJson: '{}',
+    })
+
+    const response = await app.request(
+      '/connections/tiktok/callback?error=access_denied&error_reason=user_denied&error_description=Permissions+error&state=state_denied',
+      {},
+      testEnv(db),
+    )
+
+    expect(response.status).toBe(302)
+    expect(response.headers.get('location')).toBe(
+      'https://divine.video/settings/crossposting?connection=failed&platform=tiktok&reason=provider_denied',
+    )
+    await expect(
+      db.prepare('SELECT state_id FROM oauth_states WHERE state_id = ?').bind('state_denied').first(),
+    ).resolves.toBeNull()
+    await expect(listConnections(db, PUBKEY_A)).resolves.toEqual([])
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('removes a stale failure reason from a generic callback failure', async () => {
+    await createOAuthState(db, {
+      stateId: 'state_generic_failure',
+      pubkey: PUBKEY_A,
+      platform: 'tiktok',
+      codeVerifier: 'pkce-verifier',
+      returnUrl: 'https://divine.video/settings/crossposting?reason=provider_denied',
+      createdAt: 1_000,
+      expiresAt: 1_783_383_000,
+      metadataJson: '{}',
+    })
+
+    const response = await app.request(
+      '/connections/tiktok/callback?state=state_generic_failure',
+      {},
+      testEnv(db),
+    )
+
+    expect(response.status).toBe(302)
+    expect(response.headers.get('location')).toBe(
+      'https://divine.video/settings/crossposting?connection=failed&platform=tiktok',
+    )
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('lists connections without encrypted token fields', async () => {
     await upsertConnection(db, connection({ id: 'conn_tiktok' }))
     fetchMock.mockResolvedValueOnce(authResponse())

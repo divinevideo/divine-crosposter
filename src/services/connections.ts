@@ -74,10 +74,21 @@ function preferenceSummary(preference: PreferenceRecord): PreferenceSummary {
   }
 }
 
-function redirectWithResult(returnUrl: string, platform: Platform, result: 'connected' | 'failed'): string {
+type ConnectionFailureReason = 'provider_denied'
+
+function redirectWithResult(
+  returnUrl: string,
+  platform: Platform,
+  result: 'connected' | 'failed',
+  reason?: ConnectionFailureReason,
+): string {
   const url = new URL(returnUrl)
   url.searchParams.set('connection', result)
   url.searchParams.set('platform', platform)
+  url.searchParams.delete('reason')
+  if (reason) {
+    url.searchParams.set('reason', reason)
+  }
   return url.toString()
 }
 
@@ -182,10 +193,12 @@ export async function completeConnectionCallback(
   platformValue: string,
   code: string | null,
   stateId: string | null,
+  providerError: string | null = null,
+  providerErrorReason: string | null = null,
 ): Promise<string> {
   const platform = parsePlatform(platformValue)
   const fallbackRedirect = redirectWithResult(redirectBase(env), platform, 'failed')
-  if (!code || !stateId) {
+  if (!stateId) {
     return fallbackRedirect
   }
 
@@ -197,6 +210,13 @@ export async function completeConnectionCallback(
   const failureRedirect = redirectWithResult(state.returnUrl, platform, 'failed')
   if (state.platform !== platform) {
     return failureRedirect
+  }
+
+  if (providerError || providerErrorReason || !code) {
+    const reason = providerError === 'access_denied' || providerErrorReason === 'user_denied'
+      ? 'provider_denied'
+      : undefined
+    return redirectWithResult(state.returnUrl, platform, 'failed', reason)
   }
 
   const adapter = getAdapter(env, platform)
