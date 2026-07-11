@@ -73,6 +73,8 @@ function renderHome(env: Env): string {
 
       * { box-sizing: border-box; }
 
+      [hidden] { display: none !important; }
+
       body {
         margin: 0;
         font-family: Inter, system-ui, sans-serif;
@@ -101,14 +103,33 @@ function renderHome(env: Env): string {
         padding: 28px 0 18px;
       }
 
-      .brand {
-        font-family: "Bricolage Grotesque", Inter, sans-serif;
-        font-size: 28px;
-        font-weight: 800;
-        letter-spacing: 0;
+      .brand-lockup {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        min-width: 0;
       }
 
-      .brand span { color: var(--green); }
+      .brand-app-logo {
+        display: block;
+        width: 56px;
+        height: 56px;
+        flex: 0 0 auto;
+        object-fit: contain;
+      }
+
+      .brand-wordmark {
+        display: block;
+        width: 142px;
+        height: auto;
+        flex: 0 1 auto;
+      }
+
+      .service-name {
+        font-size: 17px;
+        font-weight: 700;
+        white-space: nowrap;
+      }
 
       .pill {
         display: inline-flex;
@@ -458,12 +479,31 @@ function renderHome(env: Env): string {
           flex-direction: column;
         }
       }
+
+      @media (max-width: 440px) {
+        .brand-lockup { gap: 9px; }
+        .brand-app-logo { width: 48px; height: 48px; }
+        .brand-wordmark { width: 118px; }
+        .service-name { font-size: 15px; }
+      }
     </style>
   </head>
   <body>
     <div class="page">
       <header>
-        <div class="brand">di<span>V</span>ine Crossposter</div>
+        <div class="brand-lockup">
+          <img
+            class="brand-app-logo"
+            src="https://about.divine.video/wp-content/uploads/2026/01/diVine-3D-512.webp"
+            alt=""
+          >
+          <img
+            class="brand-wordmark"
+            src="https://about.divine.video/wp-content/uploads/2025/11/Divine-Logo-Green.svg"
+            alt="Divine"
+          >
+          <span class="service-name">Crossposter</span>
+        </div>
         <div class="pill">Opt-in only. No surprise posts.</div>
       </header>
 
@@ -509,7 +549,7 @@ function renderHome(env: Env): string {
               <p>We use login.divine.video so the same Nostr key works here, web, and mobile.</p>
               <div class="actions">
                 <button class="button primary" id="login-button-secondary" type="button">Login with Divine</button>
-                <button class="button secondary" id="logout-button" type="button">Log out</button>
+                <button class="button secondary" id="logout-button" type="button" hidden>Log out</button>
               </div>
             </div>
             <div class="flow-section">
@@ -560,6 +600,14 @@ function renderHome(env: Env): string {
         el.textContent = message;
         el.style.background = type === 'error' ? 'rgba(255,127,175,0.18)' : 'rgba(208,251,203,0.46)';
         el.style.borderColor = type === 'error' ? 'rgba(255,127,175,0.55)' : 'rgba(39,197,139,0.45)';
+      }
+
+      function renderAuthControls() {
+        const signedIn = !!session;
+        for (const id of ['login-button', 'login-button-secondary']) {
+          $(id)?.toggleAttribute('hidden', signedIn);
+        }
+        $('logout-button').toggleAttribute('hidden', !signedIn);
       }
 
       function escapeHtml(value) {
@@ -619,6 +667,7 @@ function renderHome(env: Env): string {
       function saveSession(nextSession) {
         session = nextSession;
         localStorage.setItem(SESSION_KEY, JSON.stringify(nextSession));
+        renderAuthControls();
       }
 
       function clearSession() {
@@ -627,6 +676,9 @@ function renderHome(env: Env): string {
         connections = [];
         preferences = [];
         localStorage.removeItem(SESSION_KEY);
+        const box = $('pubkey-box');
+        if (box) box.style.display = 'none';
+        renderAuthControls();
       }
 
       function isExpired(nextSession) {
@@ -695,7 +747,6 @@ function renderHome(env: Env): string {
         url.searchParams.set('code_challenge', pkce.challenge);
         url.searchParams.set('code_challenge_method', 'S256');
         url.searchParams.set('state', state);
-        url.searchParams.set('default_register', 'true');
         if (session?.authorizationHandle) url.searchParams.set('authorization_handle', session.authorizationHandle);
         window.location.href = url.toString();
       }
@@ -794,6 +845,7 @@ function renderHome(env: Env): string {
 
       async function refreshAccount() {
         session = await getValidSession();
+        renderAuthControls();
         if (!session) {
           $('pubkey-box').style.display = 'none';
           renderConnectRows();
@@ -863,6 +915,7 @@ function renderHome(env: Env): string {
       });
 
       (async function boot() {
+        renderAuthControls();
         renderConnectRows();
         renderPreferenceRows();
         await handleLoginCallback();
@@ -870,8 +923,21 @@ function renderHome(env: Env): string {
           if (session) setStatus(err.message || 'Could not load your crossposting setup.', 'error');
         });
         const params = new URLSearchParams(window.location.search);
-        if (params.get('connection') === 'connected') setStatus(platformName(params.get('platform')) + ' connected.');
-        if (params.get('connection') === 'failed') setStatus('Platform connection failed. Try again when you are ready.', 'error');
+        if (params.get('connection') === 'connected') {
+          setStatus(platformName(params.get('platform')) + ' connected.');
+        }
+        if (params.get('connection') === 'failed') {
+          const message = params.get('reason') === 'provider_denied'
+            ? platformName(params.get('platform')) + ' authorization was canceled or denied.'
+            : 'Platform connection failed. Try again when you are ready.';
+          setStatus(message, 'error');
+        }
+        if (params.has('connection')) {
+          params.delete('connection');
+          params.delete('platform');
+          params.delete('reason');
+          window.history.replaceState({}, '', window.location.pathname + (params.toString() ? '?' + params.toString() : ''));
+        }
       })();
     </script>
   </body>

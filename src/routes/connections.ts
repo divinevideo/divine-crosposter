@@ -34,6 +34,8 @@ connections.get('/connections/:platform/callback', async (c) => {
     c.req.param('platform'),
     url.searchParams.get('code'),
     url.searchParams.get('state'),
+    url.searchParams.get('error'),
+    url.searchParams.get('error_reason'),
   )
   return c.redirect(redirectUrl)
 })
