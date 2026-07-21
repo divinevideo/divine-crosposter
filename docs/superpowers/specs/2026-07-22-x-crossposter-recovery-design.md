@@ -39,7 +39,7 @@ This repair is intentionally limited to the standalone Crossposter flow. Divine 
 
 ## Architecture
 
-The existing Worker, D1 database, queue, and scheduled reconciler remain the service boundary. The repair adds a small OAuth-attempt repository beside `oauth_states`, updates the X adapter to the documented provider protocol, and adds queue/deployment operations without introducing another runtime service.
+The existing Worker, D1 database, queue, and scheduled reconciler remain the service boundary. The repair adds a small OAuth-attempt repository beside `oauth_states`, updates the X adapter to the documented provider protocol, and adds queue/deployment operations without introducing another runtime service. X post creation also gains a durable dispatch fence: before the adapter sends `POST /2/tweets`, it must await a publisher callback that moves the job from `uploading` to `dispatching`. This makes a crash or ambiguous transport result fail closed instead of creating a duplicate tweet on automatic retry.
 
 The user flow remains:
 
@@ -83,15 +83,17 @@ The lifecycle statuses are:
 ```text
 started
 provider_denied
+callback_failed
 token_exchange_failed
 account_lookup_failed
+storage_failed
 connected
 expired
 ```
 
 `oauth_states.metadata_json` links the short-lived state to the opaque attempt ID. Unknown callback states are not persisted, preventing attacker-controlled state values from becoming durable data.
 
-Every known callback transition updates the attempt before redirecting. Logs contain only structured fields safe for operations: event name, attempt ID, platform, lifecycle status, sanitized failure code, and provider HTTP status. Logs never contain a state value, pubkey, callback query string, authorization code, access token, refresh token, secret, or raw provider response.
+Every known callback transition updates the attempt before redirecting. Connection, preference, and `connected`-attempt writes execute as one D1 batch so a storage failure cannot leave a partial active connection; a failed batch is followed by a best-effort `storage_failed` transition. Logs contain only structured fields safe for operations: event name, attempt ID, platform, lifecycle status, sanitized failure code, and provider HTTP status. Logs never contain a state value, pubkey, callback query string, authorization code, access token, refresh token, secret, or raw provider response.
 
 The scheduled reconciler marks overdue `started` attempts `expired` and deletes their expired OAuth states. This turns abandoned flows into measurable outcomes and prevents the stale-state buildup visible in production today.
 
@@ -102,8 +104,10 @@ The authorization request retains PKCE S256, a random state, the exact redirect 
 Provider failures are classified at the boundary:
 
 - an explicit user/provider denial becomes `provider_denied`;
+- any other consumed callback that cannot safely proceed (missing code, non-denial provider error, route/state mismatch, or provider disabled after start) becomes `callback_failed` with no provider text retained;
 - a non-success token response becomes `token_exchange_failed` with only the HTTP status retained;
 - a non-success `/2/users/me` response or an empty user ID becomes `account_lookup_failed`;
+- an encryption or atomic persistence failure becomes `storage_failed` without leaving a partial active connection;
 - a fully stored encrypted connection becomes `connected`.
 
 The browser receives a safe failure reason suitable for retry guidance. Provider internals stay server-side.
@@ -116,21 +120,28 @@ The adapter follows X's v2 chunked media upload sequence:
 2. `APPEND`: split the source bytes into bounded chunks. For each chunk, send multipart/form data to the same endpoint with `command=APPEND`, `media_id`, `segment_index`, and a binary `media` part.
 3. `FINALIZE`: multipart/form request to the same endpoint with `command=FINALIZE` and `media_id`.
 4. `STATUS`: if `processing_info` exists, poll `GET /2/media/upload?command=STATUS&media_id=...` after the provider-supplied delay or the existing bounded service backoff.
-5. Post: after media processing succeeds, call `POST /2/tweets` with the caption and media ID.
+5. Dispatch fence: after media processing succeeds, await the publisher's durable `beforeExternalPost` callback, which changes the job status to `dispatching`.
+6. Post: only after that fence commits, call `POST /2/tweets` with the caption and media ID.
 
-An X processing state of `failed` is terminal and records a normalized provider failure rather than polling until timeout. Pending and in-progress states remain retryable. A successful post stores the full external post ID and canonical `https://x.com/i/web/status/{id}` URL.
+An X processing state of `failed` is terminal and records a normalized provider failure rather than polling until timeout. `pending` and `in_progress` remain retryable. When `processing_info` is present, only an explicit `succeeded` state permits post creation; a missing or unknown state fails closed through the bounded normalized-error path. A FINALIZE response with no `processing_info` remains the provider's synchronous-success case. A successful post stores the full external post ID and canonical `https://x.com/i/web/status/{id}` URL.
+
+The dispatch fence deliberately favors avoiding duplicate public posts over automatic recovery. A provider or transport failure after the fence, a successful response without a post ID, or a stale `dispatching` job becomes terminal `failed` with `ambiguous_post_result` and no retry timestamp. Operators reconcile that job against the X account before deciding on any manual retry. A stale X `uploading` claim is different: because the dispatch fence has not run, the scheduled reconciler may return it to the normal retry lifecycle after a five-minute lease. Other platforms are not included in this lease recovery change.
+
+Provider responses are treated as untrusted and potentially sensitive. The publisher persists only an allowlisted polling checkpoint for each platform (for X: media ID and caption while processing); it persists no X checkpoint for a posted result and no raw success or error body. Provider HTTP status and normalized error code remain available for diagnosis. The authenticated job API therefore cannot disclose provider internals through `job_attempts`.
 
 ## Queue Reliability
 
-Create `divine-crossposter-jobs-dlq` and configure the production consumer with `max_retries = 5` and `dead_letter_queue = "divine-crossposter-jobs-dlq"`. Handled provider failures continue to use the job lifecycle and retry schedule. The DLQ captures only deliveries that fail outside that controlled path.
+Create `divine-crossposter-jobs-dlq` and configure the production consumer with `max_retries = 5` and `dead_letter_queue = "divine-crossposter-jobs-dlq"`. Handled provider delays and retryable failures enqueue a fresh delayed message and acknowledge the current delivery, so they do not consume Cloudflare's native retry budget. Scheduled reconciliation also re-enqueues due `processing` jobs, recovering a failed delayed-send handoff without polling early. The DLQ captures only unhandled deliveries outside that controlled lifecycle.
 
-The deployment runbook checks that the primary queue has one producer and one consumer and that the DLQ exists. A `CROSSPOST_DLQ` binding exposes DLQ metrics to the scheduled handler. The handler checks primary and DLQ backlog metrics after reconciliation and sends a sanitized alert to an `OPS_ALERT_WEBHOOK_URL` secret when the DLQ is non-empty or the primary queue's oldest message is more than 15 minutes old. Alert payloads contain aggregate counts, timestamps, and service identifiers only.
+The deployment runbook checks that the primary queue has one producer and one consumer and that the DLQ exists. A `CROSSPOST_DLQ` binding exposes DLQ metrics to the scheduled handler. The handler reads both queue metrics after reconciliation and sends a sanitized alert to an `OPS_ALERT_WEBHOOK_URL` secret when the DLQ is non-empty. Primary staleness is determined from D1, not the queue's oldest-message timestamp: runnable `queued`, `failed`, or `processing` jobs whose due time is more than 15 minutes overdue are stale, while intentionally delayed future jobs are healthy. Alert payloads contain aggregate counts, timestamps, and service identifiers only.
 
-Cloudflare HTTP/Worker error notification covers unhandled invocation failures that the Worker cannot report itself. GitHub Actions failure notification covers build and deployment failures. The webhook, Cloudflare notification, and GitHub notification destinations are external production settings and must each be verified deliberately.
+Migration `0003_operations_alert_tests.sql` adds a one-shot `operations_alert_tests` control table. There is no public test endpoint. An authorized operator inserts an opaque test request with a remote D1 command; on the next cron, the deployed handler must successfully read both queue metrics, emit a sanitized `notification_test` through the real webhook, and mark the request consumed only after the webhook accepts it. This safely proves the deployed Worker, D1, cron, queue-metrics bindings, webhook secret, and destination without injecting or purging production queue messages.
+
+Cloudflare HTTP/Worker error notification covers unhandled invocation failures that the Worker cannot report itself. An authorized operator must query the account's eligible alert types, create or verify an enabled Worker/edge-error policy scoped as narrowly as Cloudflare permits, and verify its destination and receipt without recording destination credentials. A separate GitHub Actions notification job observes both test and deploy job results, so test failure cannot skip notification. The webhook, Cloudflare notification, and GitHub notification destinations are external production settings and must each be verified deliberately.
 
 ## Deployment Recovery
 
-GitHub Actions keeps the existing test-then-deploy structure. A repository or selected-organization `CLOUDFLARE_API_TOKEN` must be replaced with a valid token scoped to the Divine account and only the permissions required for Worker deployment, D1 migrations, queues, routes, and scripts.
+GitHub Actions keeps the existing test-then-deploy structure. A repository, production-environment, or selected-organization `CLOUDFLARE_API_TOKEN` must be replaced with a valid token scoped only to the Divine account. Its permission summary must contain Account Settings Read, Workers Scripts Edit, D1 Edit, Queues Edit, and Workers Routes Edit restricted to the `divine.video` zone. Unrelated accounts, zones, and products must not be granted.
 
 Deployment acceptance requires:
 
@@ -143,6 +154,8 @@ Deployment acceptance requires:
 7. the operations webhook test is received;
 8. Cloudflare Worker error and GitHub Actions failure notifications are confirmed.
 
+Before replacing X credentials or enabling production traffic, deploy and record an approved safety Worker version containing the repaired code, D1/DLQ bindings, and `ENABLE_X=false`. This is an active deployment, not an upload-only version, so its bindings, cron, and queue policy can be verified before credentials change. Only after that disabled deployment is healthy are the known matching X secrets replaced. Merging the approved commit then lets the normal CI deployment activate `ENABLE_X=true`. An X-path incident pauses primary queue delivery and rolls back to the safety version, preserving operational bindings without allowing authorization or posting. The pre-deploy production version and source commit are also recorded for audit.
+
 Manual Wrangler deployment using a developer OAuth session may be used to validate the repair before CI is restored, but it does not satisfy the deployment acceptance criteria.
 
 ## Testing
@@ -153,9 +166,11 @@ Tests are written before implementation changes.
 
 - starting X OAuth creates both state and `started` attempt records;
 - provider denial records `provider_denied` and returns a safe redirect reason;
+- non-denial provider errors and missing-code callbacks record `callback_failed` without provider text;
 - token exchange failure records only the sanitized class and HTTP status;
 - account lookup failure is distinct from token exchange failure;
-- success stores the encrypted connection and marks the attempt connected;
+- encryption or persistence failure records `storage_failed` and leaves no partial active connection;
+- success atomically stores the encrypted connection and manual preference and marks the attempt connected;
 - scheduled housekeeping expires abandoned attempts and deletes stale states;
 - callback logs contain none of the forbidden sensitive values.
 
@@ -163,20 +178,30 @@ Tests are written before implementation changes.
 
 - authorization URL contains the exact redirect URI, state, PKCE S256 challenge, and scopes;
 - token requests have form encoding and confidential-client authentication;
+- a 2xx token response without a nonempty access token is rejected at token exchange;
 - upload uses the same `/2/media/upload` endpoint for INIT, every APPEND, and FINALIZE;
 - APPEND uses multipart binary chunks with sequential indices;
+- a missing INIT media ID or created-post ID is rejected and cannot produce a `posted` job;
+- the durable dispatch fence commits before `/2/tweets`; a post-dispatch transport error or missing post ID becomes terminal `ambiguous_post_result` and is never automatically retried;
 - pending processing schedules a poll;
+- malformed or unknown processing state cannot create a post;
 - failed processing becomes terminal;
 - successful processing creates a post and returns the external ID and URL.
+- processing, failure, and posted attempts contain only allowlisted polling fields and never raw provider bodies.
 
 ### Regression and verification
 
 - full unit and route suite;
+- queue-handler integration proving controlled processing uses fresh delayed sends/acks and exhausts its bounded job lifecycle without native retries or a stranded processing job;
+- recovery tests proving a stale X `uploading` claim is requeued after its lease, a stale `dispatching` claim is terminal ambiguous, and no path invokes `/2/tweets` twice;
+- terminal polling errors produce terminal `failed` attempts rather than misleading `processing` attempts;
+- future delayed jobs do not trigger backlog alerts, while jobs overdue by more than 15 minutes do;
+- a production one-shot operations test is consumed only after both queue metric reads and a successful webhook receipt;
 - TypeScript typecheck;
 - remote migration dry run or apply through the deployment job;
 - live `/health` and `/platforms?format=json` smoke checks;
 - real browser authorization using an X test account;
-- one manual crosspost using an existing eligible Divine video;
+- one manual crosspost using an existing eligible Divine video through the setup page's existing authenticated API helper, without copying its bearer token;
 - production D1 verification that the attempt is connected and the job is posted, using aggregate or targeted safe queries without printing pubkeys or tokens.
 
 ## Human Checkpoints
@@ -193,9 +218,12 @@ Implementation may proceed through local and manual production validation while 
 - X authorization completes and leaves one active production connection.
 - A real eligible Divine video is posted to X by Crossposter.
 - The production job reaches `posted` with an external post ID and URL.
+- The active X connection and nonempty canonical external ID/URL are verified with safe boolean/count queries.
 - No secret, OAuth code, token, callback query string, provider body, or private key appears in logs or diagnostic tables.
 - Abandoned and failed OAuth attempts are distinguishable in D1 by sanitized lifecycle state.
 - The X upload sequence matches the current official v2 chunked-upload protocol.
 - The queue has a DLQ and bounded retry configuration.
 - The latest `main` GitHub Actions test and deploy jobs are green.
-- Deployment, Worker-error, queue-backlog, and DLQ notifications are configured and test-confirmed.
+- The primary queue has one producer and one consumer configured with five retries and the named DLQ.
+- Build/deployment, Worker-error, queue-backlog, and DLQ notifications are configured and test-confirmed.
+- X post dispatch is fenced durably; ambiguous post results require manual reconciliation and are never automatically retried.
