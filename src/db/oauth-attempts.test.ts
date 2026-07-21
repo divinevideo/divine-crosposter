@@ -46,6 +46,7 @@ describe('oauth attempt repository', () => {
       expiresAt: 1_600,
       updatedAt: 1_100,
     })
+    await expect(getOAuthAttempt(db, 'attempt_missing')).resolves.toBeNull()
   })
 
   it('expires only overdue started attempts', async () => {
@@ -54,8 +55,8 @@ describe('oauth attempt repository', () => {
       pubkey: PUBKEY_A,
       platform: 'x',
       status: 'started',
-      failureCode: null,
-      providerStatus: null,
+      failureCode: 'callback_failed',
+      providerStatus: 400,
       createdAt: 1_000,
       expiresAt: 1_100,
       updatedAt: 1_000,
@@ -69,6 +70,17 @@ describe('oauth attempt repository', () => {
       providerStatus: null,
       createdAt: 1_000,
       expiresAt: 2_000,
+      updatedAt: 1_000,
+    })
+    await createOAuthAttempt(db, {
+      id: 'attempt_boundary_started',
+      pubkey: PUBKEY_A,
+      platform: 'x',
+      status: 'started',
+      failureCode: null,
+      providerStatus: null,
+      createdAt: 1_000,
+      expiresAt: 1_200,
       updatedAt: 1_000,
     })
     await createOAuthAttempt(db, {
@@ -92,6 +104,10 @@ describe('oauth attempt repository', () => {
       updatedAt: 1_200,
     })
     await expect(getOAuthAttempt(db, 'attempt_active_started')).resolves.toMatchObject({
+      status: 'started',
+      updatedAt: 1_000,
+    })
+    await expect(getOAuthAttempt(db, 'attempt_boundary_started')).resolves.toMatchObject({
       status: 'started',
       updatedAt: 1_000,
     })

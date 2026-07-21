@@ -64,12 +64,10 @@ export type OAuthAttemptStatus =
   | 'connected'
   | 'expired'
 
-export type OAuthAttemptFailureCode =
-  | 'provider_denied'
-  | 'callback_failed'
-  | 'token_exchange_failed'
-  | 'account_lookup_failed'
-  | 'storage_failed'
+export type OAuthAttemptFailureCode = Exclude<
+  OAuthAttemptStatus,
+  'started' | 'connected' | 'expired'
+>
 
 export type OAuthAttemptRecord = {
   id: string
