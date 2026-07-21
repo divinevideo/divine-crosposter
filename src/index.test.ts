@@ -47,6 +47,9 @@ describe('health route', () => {
     expect(html).toContain('X authorized, but the account could not be loaded. Try again.')
     expect(html).toContain('X authorized, but Crossposter could not save the connection. Try again.')
     expect(html).toContain('Platform connection failed. Try again when you are ready.')
+    expect(html).toContain("if (platform !== 'x') return 'Platform connection failed. Try again when you are ready.';")
+    expect(html).toContain("connectionFailureMessage(params.get('platform'), params.get('reason'))")
+    expect(html).not.toContain("platformName(params.get('platform')) + ' authorization was canceled or denied.'")
   })
 
   it('returns service health', async () => {

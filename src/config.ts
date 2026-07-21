@@ -34,7 +34,7 @@ function isEnabled(value: string | undefined): boolean {
   return value === 'true'
 }
 
-function parseYouTubePrivacyStatus(value: string | undefined): YouTubePrivacyStatus {
+export function parseYouTubePrivacyStatus(value: string | undefined): YouTubePrivacyStatus {
   if (!value) {
     return 'private'
   }
@@ -42,6 +42,10 @@ function parseYouTubePrivacyStatus(value: string | undefined): YouTubePrivacySta
     return value
   }
   throw new HttpError(500, 'invalid_config', 'YOUTUBE_DEFAULT_PRIVACY_STATUS must be private, public, or unlisted')
+}
+
+export function oauthRedirectBase(env: Pick<Env, 'OAUTH_REDIRECT_BASE'>): string {
+  return requireUrl('OAUTH_REDIRECT_BASE', env.OAUTH_REDIRECT_BASE)
 }
 
 export function loadConfig(env: Env): AppConfig {
@@ -52,7 +56,7 @@ export function loadConfig(env: Env): AppConfig {
   return {
     keycastUrl: requireUrl('KEYCAST_URL', env.KEYCAST_URL),
     funnelcakeUrl: requireUrl('FUNNELCAKE_URL', env.FUNNELCAKE_URL),
-    oauthRedirectBase: requireUrl('OAUTH_REDIRECT_BASE', env.OAUTH_REDIRECT_BASE),
+    oauthRedirectBase: oauthRedirectBase(env),
     tokenEncryptionKey: env.TOKEN_ENCRYPTION_KEY,
     youtubeDefaultPrivacyStatus: parseYouTubePrivacyStatus(env.YOUTUBE_DEFAULT_PRIVACY_STATUS),
     features: {

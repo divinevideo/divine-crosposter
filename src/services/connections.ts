@@ -9,7 +9,7 @@ import {
 import { createOAuthAttempt, updateOAuthAttempt } from '../db/oauth-attempts'
 import { consumeOAuthState, createOAuthState } from '../db/oauth-states'
 import { getPreferences, setPreference } from '../db/preferences'
-import { loadConfig } from '../config'
+import { loadConfig, oauthRedirectBase } from '../config'
 import { getAdapter } from '../platforms/registry'
 import { PlatformAdapterError } from '../platforms/adapter'
 import type { PlatformAccount, PlatformAdapter, TokenSet } from '../platforms/adapter'
@@ -57,7 +57,7 @@ function nowSeconds(): number {
 }
 
 function callbackRedirectUri(env: Env, platform: Platform): string {
-  return `${redirectBase(env)}/connections/${platform}/callback`
+  return `${oauthRedirectBase(env)}/connections/${platform}/callback`
 }
 
 function connectionSummary(connection: ConnectionRecord): ConnectionSummary {
@@ -110,7 +110,7 @@ function redirectWithResult(
 }
 
 function redirectBase(env: Env): string {
-  return env.OAUTH_REDIRECT_BASE.replace(/\/$/, '')
+  return oauthRedirectBase(env)
 }
 
 export function attemptIdFromState(state: OAuthStateRecord): string | null {
@@ -156,25 +156,14 @@ export async function transitionAttempt(
   error?: unknown,
 ): Promise<void> {
   if (!attemptId) return
-  try {
-    await updateOAuthAttempt(env.DB, {
-      id: attemptId,
-      status,
-      failureCode,
-      providerStatus: providerStatus(error),
-      updatedAt: nowSeconds(),
-    })
-  } finally {
-    logAttemptTransition(attemptId, platform, status, failureCode, error)
-  }
-}
-
-function callbackAdapter(env: Env, platform: Platform): PlatformAdapter | null {
-  return getAdapter({
-    ...env,
-    TOKEN_ENCRYPTION_KEY:
-      env.TOKEN_ENCRYPTION_KEY.length >= 32 ? env.TOKEN_ENCRYPTION_KEY : '00000000000000000000000000000000',
-  }, platform)
+  await updateOAuthAttempt(env.DB, {
+    id: attemptId,
+    status,
+    failureCode,
+    providerStatus: providerStatus(error),
+    updatedAt: nowSeconds(),
+  })
+  logAttemptTransition(attemptId, platform, status, failureCode, error)
 }
 
 async function failureRedirect(
@@ -251,16 +240,21 @@ export async function startConnection(
     updatedAt: now,
   })
 
-  await createOAuthState(env.DB, {
-    stateId: state,
-    pubkey,
-    platform,
-    codeVerifier: pkce.verifier,
-    returnUrl,
-    createdAt: now,
-    expiresAt,
-    metadataJson: JSON.stringify({ attemptId }),
-  })
+  try {
+    await createOAuthState(env.DB, {
+      stateId: state,
+      pubkey,
+      platform,
+      codeVerifier: pkce.verifier,
+      returnUrl,
+      createdAt: now,
+      expiresAt,
+      metadataJson: JSON.stringify({ attemptId }),
+    })
+  } catch (error) {
+    await transitionAttempt(env, attemptId, platform, 'storage_failed', 'storage_failed', error).catch(() => undefined)
+    throw error
+  }
 
   return {
     state,
@@ -281,14 +275,13 @@ export async function completeConnectionCallback(
   providerErrorReason: string | null = null,
 ): Promise<string> {
   const platform = parsePlatform(platformValue)
-  const fallbackRedirect = redirectWithResult(redirectBase(env), platform, 'failed')
   if (!stateId) {
-    return fallbackRedirect
+    return redirectWithResult(redirectBase(env), platform, 'failed')
   }
 
   const state = await consumeOAuthState(env.DB, stateId, nowSeconds())
   if (!state) {
-    return fallbackRedirect
+    return redirectWithResult(redirectBase(env), platform, 'failed')
   }
 
   if (state.platform !== platform) {
@@ -306,7 +299,14 @@ export async function completeConnectionCallback(
     return failureRedirect(env, state, platform, 'callback_failed')
   }
 
-  const adapter = callbackAdapter(env, platform)
+  let adapter: PlatformAdapter | null
+  let redirectUri: string
+  try {
+    adapter = getAdapter(env, platform)
+    redirectUri = callbackRedirectUri(env, platform)
+  } catch {
+    return failureRedirect(env, state, platform, 'callback_failed')
+  }
   if (!adapter) {
     return failureRedirect(env, state, platform, 'callback_failed')
   }
@@ -315,7 +315,7 @@ export async function completeConnectionCallback(
   try {
     tokens = await adapter.exchangeCallback({
       code,
-      redirectUri: callbackRedirectUri(env, platform),
+      redirectUri,
       codeVerifier: state.codeVerifier ?? undefined,
     })
   } catch (error) {

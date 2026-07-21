@@ -97,7 +97,7 @@ export async function completeConnectionSetup(
     attemptId: string | null
     now: number
   },
-): Promise<ConnectionRecord> {
+): Promise<void> {
   const { connection, preference } = input
   await db.batch([
     db
@@ -169,17 +169,6 @@ export async function completeConnectionSetup(
       .bind(input.now, input.attemptId, connection.pubkey, connection.platform),
   ])
 
-  const row = await firstPrepared<ConnectionRow>(
-    db,
-    'SELECT * FROM connections WHERE pubkey = ? AND platform = ? AND external_account_id = ?',
-    connection.pubkey,
-    connection.platform,
-    connection.externalAccountId,
-  )
-  if (!row) {
-    throw new Error('failed to complete connection setup')
-  }
-  return mapConnection(row)
 }
 
 export async function listConnections(db: D1Database, pubkey: string): Promise<ConnectionRecord[]> {

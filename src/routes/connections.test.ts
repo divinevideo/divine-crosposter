@@ -6,6 +6,7 @@ import { createOAuthState } from '../db/oauth-states'
 import { getPreferences, setPreference } from '../db/preferences'
 import { applyMigrations, connection, PUBKEY_A } from '../db/test-helpers'
 import { decryptToken } from '../utils/crypto'
+import { transitionAttempt } from '../services/connections'
 import type { Env, Platform } from '../types'
 
 function testEnv(db: D1Database, overrides: Partial<Env> = {}): Env {
@@ -77,6 +78,23 @@ function mockSuccessfulXCallback(fetchMock: ReturnType<typeof vi.fn>): void {
     .mockResolvedValueOnce(Response.json({ data: { id: 'x-account-1', username: 'divine' } }))
 }
 
+function rejectPostBatchConnectionRead(db: D1Database): D1Database {
+  return new Proxy(db, {
+    get(target, property, receiver) {
+      if (property === 'prepare') {
+        return (query: string) => {
+          if (query.startsWith('SELECT * FROM connections WHERE pubkey = ? AND platform = ?')) {
+            throw new Error('post-batch connection read rejected')
+          }
+          return target.prepare(query)
+        }
+      }
+      const value = Reflect.get(target, property, receiver) as unknown
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+}
+
 describe('connection routes', () => {
   let db: D1Database
   let fetchMock: ReturnType<typeof vi.fn>
@@ -146,6 +164,40 @@ describe('connection routes', () => {
       status: 'started',
       expiresAt: 1_783_383_000,
     })
+  })
+
+  it('marks a started attempt storage_failed when OAuth state storage fails', async () => {
+    fetchMock.mockResolvedValueOnce(authResponse())
+    await db.prepare(
+      "CREATE TRIGGER reject_oauth_state_insert BEFORE INSERT ON oauth_states BEGIN SELECT RAISE(FAIL, 'forced'); END",
+    ).run()
+
+    try {
+      const response = await app.request(
+        '/connections/x/start',
+        {
+          method: 'POST',
+          headers: { authorization: 'Bearer keycast-token', 'content-type': 'application/json' },
+          body: JSON.stringify({ returnUrl: 'https://divine.video/settings/crossposting' }),
+        },
+        testEnv(db),
+      )
+
+      expect(response.status).toBe(500)
+      const attempt = await db.prepare('SELECT * FROM oauth_attempts').first<{
+        pubkey: string
+        status: string
+        failure_code: string | null
+      }>()
+      expect(attempt).toMatchObject({
+        pubkey: PUBKEY_A,
+        status: 'storage_failed',
+        failure_code: 'storage_failed',
+      })
+      await expect(db.prepare('SELECT * FROM oauth_states').first()).resolves.toBeNull()
+    } finally {
+      await db.prepare('DROP TRIGGER reject_oauth_state_insert').run()
+    }
   })
 
   it('consumes callback state once, stores encrypted tokens, and creates a default manual preference', async () => {
@@ -418,6 +470,29 @@ describe('connection routes', () => {
     }
   })
 
+  it('does not log a successful transition when attempt persistence fails', async () => {
+    await createTrackedState(db, { attemptId: 'oauth_attempt_transition_failure', stateId: 'private-state-transition' })
+    await db.prepare(
+      "CREATE TRIGGER reject_attempt_transition BEFORE UPDATE ON oauth_attempts BEGIN SELECT RAISE(FAIL, 'forced'); END",
+    ).run()
+    const logSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+
+    try {
+      await expect(
+        transitionAttempt(
+          testEnv(db),
+          'oauth_attempt_transition_failure',
+          'x',
+          'callback_failed',
+          'callback_failed',
+        ),
+      ).rejects.toThrow()
+      expect(logSpy).not.toHaveBeenCalled()
+    } finally {
+      await db.prepare('DROP TRIGGER reject_attempt_transition').run()
+    }
+  })
+
   it('records storage_failed without a connection or preference when token encryption is misconfigured', async () => {
     await createTrackedState(db, { attemptId: 'oauth_attempt_bad_key', stateId: 'private-state-bad-key' })
     mockSuccessfulXCallback(fetchMock)
@@ -436,6 +511,88 @@ describe('connection routes', () => {
       failureCode: 'storage_failed',
       providerStatus: null,
     })
+  })
+
+  it('records storage_failed when TOKEN_ENCRYPTION_KEY is absent at callback time', async () => {
+    await createTrackedState(db, { attemptId: 'oauth_attempt_missing_key', stateId: 'private-state-missing-key' })
+    mockSuccessfulXCallback(fetchMock)
+
+    const response = await app.request(
+      '/connections/x/callback?code=private-auth-code&state=private-state-missing-key',
+      {},
+      testEnv(db, { TOKEN_ENCRYPTION_KEY: undefined as unknown as string }),
+    )
+
+    expect(response.status).toBe(302)
+    expect(response.headers.get('location')).toContain('reason=storage_failed')
+    await expect(listConnections(db, PUBKEY_A)).resolves.toEqual([])
+    await expect(getPreferences(db, PUBKEY_A)).resolves.toEqual([])
+    await expect(getOAuthAttempt(db, 'oauth_attempt_missing_key')).resolves.toMatchObject({
+      status: 'storage_failed',
+      failureCode: 'storage_failed',
+      providerStatus: null,
+    })
+  })
+
+  it('normalizes a trailing slash in the OAuth callback redirect URI', async () => {
+    await createTrackedState(db, { attemptId: 'oauth_attempt_trailing_slash', stateId: 'private-state-trailing-slash' })
+    fetchMock
+      .mockImplementationOnce(async (_url: string, init: RequestInit) => {
+        const body = init.body as URLSearchParams
+        expect(body.get('redirect_uri')).toBe('https://crossposter.divine.video/connections/x/callback')
+        return Response.json({ access_token: 'private-access-token' })
+      })
+      .mockResolvedValueOnce(Response.json({ data: { id: 'x-account-trailing', username: 'divine' } }))
+
+    const response = await app.request(
+      '/connections/x/callback?code=private-auth-code&state=private-state-trailing-slash',
+      {},
+      testEnv(db, { OAUTH_REDIRECT_BASE: 'https://crossposter.divine.video/' }),
+    )
+
+    expect(response.headers.get('location')).toContain('connection=connected')
+  })
+
+  it.each([
+    {
+      caseName: 'invalid redirect URL',
+      platform: 'x' as const,
+      stateId: 'private-state-invalid-redirect',
+      attemptId: 'oauth_attempt_invalid_redirect',
+      overrides: { OAUTH_REDIRECT_BASE: 'not-a-url' },
+    },
+    {
+      caseName: 'invalid requested-provider configuration',
+      platform: 'youtube' as const,
+      stateId: 'private-state-invalid-youtube',
+      attemptId: 'oauth_attempt_invalid_youtube',
+      overrides: {
+        ENABLE_YOUTUBE: 'true',
+        GOOGLE_CLIENT_ID: 'google-client',
+        GOOGLE_CLIENT_SECRET: 'google-secret',
+        YOUTUBE_DEFAULT_PRIVACY_STATUS: 'friends',
+      },
+    },
+  ])('classifies $caseName as callback_failed after consuming tracked state', async (testCase) => {
+    await createTrackedState(db, {
+      attemptId: testCase.attemptId,
+      stateId: testCase.stateId,
+      platform: testCase.platform,
+    })
+
+    const response = await app.request(
+      `/connections/${testCase.platform}/callback?code=private-auth-code&state=${testCase.stateId}`,
+      {},
+      testEnv(db, testCase.overrides),
+    )
+
+    expect(response.status).toBe(302)
+    expect(response.headers.get('location')).toContain('reason=callback_failed')
+    await expect(getOAuthAttempt(db, testCase.attemptId)).resolves.toMatchObject({
+      status: 'callback_failed',
+      failureCode: 'callback_failed',
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it.each([
@@ -479,6 +636,22 @@ describe('connection routes', () => {
     } finally {
       await db.prepare(`DROP TRIGGER ${triggerName}`).run()
     }
+  })
+
+  it('does not read the canonical connection after the atomic setup batch commits', async () => {
+    await createTrackedState(db, { attemptId: 'oauth_attempt_no_post_read', stateId: 'private-state-no-post-read' })
+    mockSuccessfulXCallback(fetchMock)
+    const guardedDb = rejectPostBatchConnectionRead(db)
+
+    const response = await app.request(
+      '/connections/x/callback?code=private-auth-code&state=private-state-no-post-read',
+      {},
+      testEnv(guardedDb),
+    )
+
+    expect(response.headers.get('location')).toContain('connection=connected')
+    await expect(getOAuthAttempt(db, 'oauth_attempt_no_post_read')).resolves.toMatchObject({ status: 'connected' })
+    await expect(listConnections(db, PUBKEY_A)).resolves.toHaveLength(1)
   })
 
   it('removes a stale failure reason from a generic callback failure', async () => {
@@ -565,6 +738,49 @@ describe('connection routes', () => {
     expect(response.status).toBe(302)
     await expect(getPreferences(db, PUBKEY_A)).resolves.toMatchObject([
       { platform: 'tiktok', mode: 'manual', connectionId: 'conn_old', automaticEnabledAt: null },
+    ])
+  })
+
+  it.each([
+    ['manual', null],
+    ['automatic', 1_400],
+  ] as const)('reconnect preserves an existing %s preference exactly', async (mode, automaticEnabledAt) => {
+    await upsertConnection(db, connection({ id: 'conn_preserved', platform: 'x', status: 'disconnected' }))
+    await setPreference(db, {
+      pubkey: PUBKEY_A,
+      platform: 'x',
+      connectionId: 'conn_preserved',
+      mode,
+      automaticEnabledAt,
+      createdAt: 1_000,
+      updatedAt: 1_500,
+    })
+    await createTrackedState(db, {
+      attemptId: `oauth_attempt_preserve_${mode}`,
+      stateId: `private-state-preserve-${mode}`,
+    })
+    fetchMock
+      .mockResolvedValueOnce(Response.json({ access_token: 'private-access-token' }))
+      .mockResolvedValueOnce(
+        Response.json({ data: { id: 'external-account-1', username: 'divine' } }),
+      )
+
+    const response = await app.request(
+      `/connections/x/callback?code=private-auth-code&state=private-state-preserve-${mode}`,
+      {},
+      testEnv(db),
+    )
+
+    expect(response.headers.get('location')).toContain('connection=connected')
+    await expect(getPreferences(db, PUBKEY_A)).resolves.toMatchObject([
+      {
+        platform: 'x',
+        mode,
+        connectionId: 'conn_preserved',
+        automaticEnabledAt,
+        createdAt: 1_000,
+        updatedAt: 1_500,
+      },
     ])
   })
 
