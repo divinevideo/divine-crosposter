@@ -6,6 +6,8 @@ import {
 } from '../config'
 import { getCursor, upsertCursor } from '../db/cursors'
 import { listRunnableJobs } from '../db/jobs'
+import { expireStartedOAuthAttempts } from '../db/oauth-attempts'
+import { deleteExpiredOAuthStates } from '../db/oauth-states'
 import { listAutomaticPreferences } from '../db/preferences'
 import { listRecentUserVideos } from '../funnelcake/client'
 import type { DivineVideoEvent } from '../funnelcake/client'
@@ -17,6 +19,8 @@ export type ReconciliationResult = {
   eventsChecked: number
   jobsCreatedOrFound: number
   queuedJobsEnqueued: number
+  oauthAttemptsExpired: number
+  oauthStatesDeleted: number
 }
 
 function groupPreferencesByPubkey(preferences: PreferenceRecord[]): Map<string, PreferenceRecord[]> {
@@ -58,6 +62,8 @@ export async function runAutoCrosspostReconciliation(
   let eventsChecked = 0
   let jobsCreatedOrFound = 0
   let queuedJobsEnqueued = 0
+  const oauthAttemptsExpired = await expireStartedOAuthAttempts(env.DB, now)
+  const oauthStatesDeleted = await deleteExpiredOAuthStates(env.DB, now)
 
   const runnableJobs = await listRunnableJobs(env.DB, now, AUTO_RECONCILE_QUEUED_JOB_LIMIT)
   for (const job of runnableJobs) {
@@ -103,5 +109,12 @@ export async function runAutoCrosspostReconciliation(
     }
   }
 
-  return { usersChecked, eventsChecked, jobsCreatedOrFound, queuedJobsEnqueued }
+  return {
+    usersChecked,
+    eventsChecked,
+    jobsCreatedOrFound,
+    queuedJobsEnqueued,
+    oauthAttemptsExpired,
+    oauthStatesDeleted,
+  }
 }

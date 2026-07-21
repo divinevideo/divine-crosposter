@@ -41,6 +41,12 @@ describe('health route', () => {
     expect(html).toContain('function clearRejectedSession(response)')
     expect(html).toContain('clearRejectedSession(resp)')
     expect(html).not.toContain("url.searchParams.set('default_register', 'true')")
+    expect(html).toContain('X authorization was canceled or denied.')
+    expect(html).toContain('X did not return a usable authorization response. Try again.')
+    expect(html).toContain('X did not complete authorization. Check the callback setting and try again.')
+    expect(html).toContain('X authorized, but the account could not be loaded. Try again.')
+    expect(html).toContain('X authorized, but Crossposter could not save the connection. Try again.')
+    expect(html).toContain('Platform connection failed. Try again when you are ready.')
   })
 
   it('returns service health', async () => {

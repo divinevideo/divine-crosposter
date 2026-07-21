@@ -1,5 +1,5 @@
 import { allPrepared, changes, firstPrepared, runPrepared } from './client'
-import type { ConnectionRecord, ConnectionStatus, Platform } from '../types'
+import type { ConnectionRecord, ConnectionStatus, Platform, PreferenceRecord } from '../types'
 
 type ConnectionRow = {
   id: string
@@ -85,6 +85,99 @@ export async function upsertConnection(db: D1Database, input: ConnectionRecord):
   )
   if (!row) {
     throw new Error('failed to upsert connection')
+  }
+  return mapConnection(row)
+}
+
+export async function completeConnectionSetup(
+  db: D1Database,
+  input: {
+    connection: ConnectionRecord
+    preference: PreferenceRecord
+    attemptId: string | null
+    now: number
+  },
+): Promise<ConnectionRecord> {
+  const { connection, preference } = input
+  await db.batch([
+    db
+      .prepare(
+        `INSERT INTO connections (
+          id, pubkey, platform, external_account_id, external_account_name,
+          encrypted_access_token, encrypted_refresh_token, token_expires_at,
+          granted_scopes, status, created_at, updated_at, last_refresh_at, metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(pubkey, platform, external_account_id) DO UPDATE SET
+          external_account_name = excluded.external_account_name,
+          encrypted_access_token = excluded.encrypted_access_token,
+          encrypted_refresh_token = excluded.encrypted_refresh_token,
+          token_expires_at = excluded.token_expires_at,
+          granted_scopes = excluded.granted_scopes,
+          status = excluded.status,
+          updated_at = excluded.updated_at,
+          last_refresh_at = excluded.last_refresh_at,
+          metadata_json = excluded.metadata_json`,
+      )
+      .bind(
+        connection.id,
+        connection.pubkey,
+        connection.platform,
+        connection.externalAccountId,
+        connection.externalAccountName,
+        connection.encryptedAccessToken,
+        connection.encryptedRefreshToken,
+        connection.tokenExpiresAt,
+        connection.grantedScopes,
+        connection.status,
+        connection.createdAt,
+        connection.updatedAt,
+        connection.lastRefreshAt,
+        connection.metadataJson,
+      ),
+    db
+      .prepare(
+        `INSERT INTO preferences (
+          pubkey, platform, connection_id, mode, automatic_enabled_at, created_at, updated_at
+        ) SELECT ?, ?, (
+          SELECT id FROM connections
+          WHERE pubkey = ? AND platform = ? AND external_account_id = ?
+        ), ?, ?, ?, ?
+        ON CONFLICT(pubkey, platform) DO UPDATE SET
+          connection_id = excluded.connection_id,
+          mode = excluded.mode,
+          automatic_enabled_at = excluded.automatic_enabled_at,
+          updated_at = excluded.updated_at
+        WHERE preferences.mode NOT IN ('manual', 'automatic')`,
+      )
+      .bind(
+        preference.pubkey,
+        preference.platform,
+        connection.pubkey,
+        connection.platform,
+        connection.externalAccountId,
+        preference.mode,
+        preference.mode === 'automatic' ? preference.automaticEnabledAt ?? preference.updatedAt : null,
+        preference.createdAt,
+        preference.updatedAt,
+      ),
+    db
+      .prepare(
+        `UPDATE oauth_attempts
+        SET status = 'connected', failure_code = NULL, provider_status = NULL, updated_at = ?
+        WHERE id = ? AND pubkey = ? AND platform = ? AND status = 'started'`,
+      )
+      .bind(input.now, input.attemptId, connection.pubkey, connection.platform),
+  ])
+
+  const row = await firstPrepared<ConnectionRow>(
+    db,
+    'SELECT * FROM connections WHERE pubkey = ? AND platform = ? AND external_account_id = ?',
+    connection.pubkey,
+    connection.platform,
+    connection.externalAccountId,
+  )
+  if (!row) {
+    throw new Error('failed to complete connection setup')
   }
   return mapConnection(row)
 }

@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { getCursor, upsertCursor } from '../db/cursors'
 import { upsertConnection } from '../db/connections'
 import { createOrGetJob, listJobsForVideo } from '../db/jobs'
+import { createOAuthAttempt, getOAuthAttempt } from '../db/oauth-attempts'
+import { createOAuthState } from '../db/oauth-states'
 import { setPreference } from '../db/preferences'
 import { applyMigrations, connection, job, PUBKEY_A, VIDEO_EVENT_ID } from '../db/test-helpers'
 import type { Env, Platform, PreferenceMode } from '../types'
@@ -110,8 +112,48 @@ describe('automatic crosspost reconciler', () => {
 
     const result = await runAutoCrosspostReconciliation(env(db, queueSend), { now: 3_000 })
 
-    expect(result).toEqual({ usersChecked: 0, eventsChecked: 0, jobsCreatedOrFound: 0, queuedJobsEnqueued: 0 })
+    expect(result).toEqual({
+      usersChecked: 0,
+      eventsChecked: 0,
+      jobsCreatedOrFound: 0,
+      queuedJobsEnqueued: 0,
+      oauthAttemptsExpired: 0,
+      oauthStatesDeleted: 0,
+    })
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('expires abandoned OAuth starts and deletes their expired states', async () => {
+    await createOAuthAttempt(db, {
+      id: 'oauth_attempt_abandoned',
+      pubkey: PUBKEY_A,
+      platform: 'x',
+      status: 'started',
+      failureCode: null,
+      providerStatus: null,
+      createdAt: 1_000,
+      expiresAt: 2_000,
+      updatedAt: 1_000,
+    })
+    await createOAuthState(db, {
+      stateId: 'expired-private-state',
+      pubkey: PUBKEY_A,
+      platform: 'x',
+      codeVerifier: 'expired-private-verifier',
+      returnUrl: 'https://divine.video/settings/crossposting',
+      createdAt: 1_000,
+      expiresAt: 2_000,
+      metadataJson: JSON.stringify({ attemptId: 'oauth_attempt_abandoned' }),
+    })
+
+    const result = await runAutoCrosspostReconciliation(env(db, queueSend), { now: 3_000 })
+
+    expect(result.oauthAttemptsExpired).toBe(1)
+    expect(result.oauthStatesDeleted).toBe(1)
+    await expect(getOAuthAttempt(db, 'oauth_attempt_abandoned')).resolves.toMatchObject({ status: 'expired' })
+    await expect(
+      db.prepare('SELECT state_id FROM oauth_states WHERE state_id = ?').bind('expired-private-state').first(),
+    ).resolves.toBeNull()
   })
 
   it('advances cursor after inspected videos', async () => {
