@@ -1,0 +1,31 @@
+{
+  "metaswarm_version": "1.0.0",
+  "distribution": "plugin",
+  "installed_at": "2026-07-21T22:34:00.934Z",
+  "updated_at": "2026-07-21T22:34:00.934Z",
+  "detection": {
+    "language": "TypeScript",
+    "framework": "Hono",
+    "test_runner": "vitest",
+    "linter": null,
+    "formatter": null,
+    "package_manager": "npm",
+    "type_checker": "tsc",
+    "ci": "GitHub Actions",
+    "git_hooks": null
+  },
+  "choices": {
+    "coverage_threshold": 100,
+    "external_tools": false,
+    "visual_review": false,
+    "ci_pipeline": false,
+    "git_hooks": false
+  },
+  "commands": {
+    "test": "npx vitest run",
+    "coverage": "npx vitest run --coverage",
+    "lint": null,
+    "typecheck": "npm run typecheck",
+    "format_check": null
+  }
+}

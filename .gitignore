@@ -4,5 +4,22 @@ dist/
 .dev.vars
 .env
 .env.*
+!.env.example
 coverage/
 *.tsbuildinfo
+.DS_Store
+*.log
+
+# BEADS runtime
+.beads/beads.db
+.beads/daemon.lock
+.beads/daemon.pid
+.beads/daemon.log
+.beads/temp/
+
+# BEADS execution state
+.beads/context/
+.beads/plans/
+
+# Local plan-review render artifacts
+docs/superpowers/plans/.clearance-rendered-preview-*/
