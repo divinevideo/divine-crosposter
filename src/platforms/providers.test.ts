@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { PlatformAdapterError } from './adapter'
 import { createInstagramAdapter } from './instagram'
 import { createTikTokAdapter } from './tiktok'
 import { createXAdapter } from './x'
@@ -288,6 +289,120 @@ describe('provider adapters', () => {
       platform: 'tiktok',
     })
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  describe('X OAuth', () => {
+    const callbackInput = {
+      code: 'authorization-code',
+      redirectUri: 'https://crossposter.divine.video/connections/x/callback',
+      codeVerifier: 'pkce-code-verifier',
+    }
+
+    it('builds the authorization URL with the production redirect, state, PKCE challenge, and scopes', () => {
+      const adapter = createXAdapter({ clientId: 'client', clientSecret: 'secret' })
+      const authorizationUrl = new URL(
+        adapter.buildAuthorizationUrl({
+          state: 'oauth-state',
+          redirectUri: callbackInput.redirectUri,
+          codeChallenge: 'pkce-code-challenge',
+        }),
+      )
+
+      expect(authorizationUrl.searchParams.get('redirect_uri')).toBe(callbackInput.redirectUri)
+      expect(authorizationUrl.searchParams.get('state')).toBe('oauth-state')
+      expect(authorizationUrl.searchParams.get('code_challenge')).toBe('pkce-code-challenge')
+      expect(authorizationUrl.searchParams.get('code_challenge_method')).toBe('S256')
+      expect(new Set(authorizationUrl.searchParams.get('scope')?.split(' '))).toEqual(
+        new Set(['tweet.read', 'tweet.write', 'users.read', 'media.write', 'offline.access']),
+      )
+    })
+
+    it('exchanges a callback using confidential-client form authentication and parses the token response', async () => {
+      const adapter = createXAdapter({ clientId: 'client', clientSecret: 'secret' })
+      const tokenResponse = {
+        access_token: 'access-token',
+        refresh_token: 'refresh-token',
+        expires_in: 7200,
+        scope: 'tweet.read tweet.write users.read media.write offline.access',
+      }
+      fetchMock.mockResolvedValueOnce(Response.json(tokenResponse))
+
+      await expect(adapter.exchangeCallback(callbackInput)).resolves.toMatchObject({
+        accessToken: 'access-token',
+        refreshToken: 'refresh-token',
+        expiresAt: expect.any(Number),
+        scopes: ['tweet.read', 'tweet.write', 'users.read', 'media.write', 'offline.access'],
+        metadata: tokenResponse,
+      })
+
+      expect.soft(fetchMock).toHaveBeenCalledWith(
+        'https://api.x.com/2/oauth2/token',
+        expect.objectContaining({
+          method: 'POST',
+          headers: {
+            authorization: 'Basic Y2xpZW50OnNlY3JldA==',
+            'content-type': 'application/x-www-form-urlencoded',
+          },
+        }),
+      )
+      expect(Object.fromEntries(bodyAsParams(fetchMock.mock.calls[0]))).toEqual({
+        client_id: 'client',
+        grant_type: 'authorization_code',
+        redirect_uri: callbackInput.redirectUri,
+        code: 'authorization-code',
+        code_verifier: 'pkce-code-verifier',
+      })
+    })
+
+    it('refreshes using confidential-client form authentication and parses the token response', async () => {
+      const adapter = createXAdapter({ clientId: 'client', clientSecret: 'secret' })
+      fetchMock.mockResolvedValueOnce(
+        Response.json({ access_token: 'refreshed-access-token', refresh_token: 'next-refresh-token' }),
+      )
+
+      await expect(adapter.refreshToken({ refreshToken: 'refresh-token' })).resolves.toMatchObject({
+        accessToken: 'refreshed-access-token',
+        refreshToken: 'next-refresh-token',
+      })
+
+      expect.soft(fetchMock).toHaveBeenCalledWith(
+        'https://api.x.com/2/oauth2/token',
+        expect.objectContaining({
+          method: 'POST',
+          headers: {
+            authorization: 'Basic Y2xpZW50OnNlY3JldA==',
+            'content-type': 'application/x-www-form-urlencoded',
+          },
+        }),
+      )
+      expect(Object.fromEntries(bodyAsParams(fetchMock.mock.calls[0]))).toEqual({
+        client_id: 'client',
+        grant_type: 'refresh_token',
+        refresh_token: 'refresh-token',
+      })
+    })
+
+    it.each([
+      ['missing', { provider_secret: 'missing-access-token-sentinel' }],
+      ['empty', { access_token: '', provider_secret: 'empty-access-token-sentinel' }],
+    ])('rejects a 200 token response with %s access_token without exposing its body', async (_case, tokenResponse) => {
+      const adapter = createXAdapter({ clientId: 'client', clientSecret: 'secret' })
+      fetchMock.mockResolvedValueOnce(Response.json(tokenResponse))
+
+      const error = await adapter.exchangeCallback(callbackInput).catch((caught: unknown) => caught)
+
+      expect(error).toBeInstanceOf(PlatformAdapterError)
+      expect(error).toMatchObject({
+        platform: 'x',
+        code: 'unknown_platform_error',
+        providerStatus: 200,
+        providerResponse: undefined,
+      })
+      expect(String((error as Error).message)).toBe('X token response missing access token')
+      expect(JSON.stringify(error)).not.toContain('access-token-sentinel')
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(fetchMock).toHaveBeenCalledWith('https://api.x.com/2/oauth2/token', expect.any(Object))
+    })
   })
 
   it('uploads X video bytes with INIT, APPEND, FINALIZE, then creates a post', async () => {

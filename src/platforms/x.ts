@@ -1,4 +1,4 @@
-import { asRecord, expectProviderOk, fetchVideoBytes } from './adapter'
+import { asRecord, expectProviderOk, fetchVideoBytes, PlatformAdapterError } from './adapter'
 import type { PlatformAdapter, PublishResult, TokenSet } from './adapter'
 
 type XConfig = {
@@ -20,14 +20,29 @@ function bytesToBase64(bytes: ArrayBuffer): string {
 }
 
 function tokenSetFromResponse(response: Record<string, unknown>): TokenSet {
+  if (typeof response.access_token !== 'string' || response.access_token.length === 0) {
+    throw new PlatformAdapterError('x', 'unknown_platform_error', 'X token response missing access token', 200)
+  }
   const expiresIn = typeof response.expires_in === 'number' ? response.expires_in : undefined
   return {
-    accessToken: String(response.access_token ?? ''),
+    accessToken: response.access_token,
     refreshToken: typeof response.refresh_token === 'string' ? response.refresh_token : undefined,
     expiresAt: expiresIn ? Math.floor(Date.now() / 1000) + expiresIn : undefined,
     scopes: typeof response.scope === 'string' ? response.scope.split(' ') : SCOPES.split(' '),
     metadata: response,
   }
+}
+
+async function requestToken(config: XConfig, body: URLSearchParams): Promise<TokenSet> {
+  const response = await fetch(`${API_BASE}/oauth2/token`, {
+    method: 'POST',
+    headers: {
+      authorization: `Basic ${btoa(`${config.clientId}:${config.clientSecret}`)}`,
+      'content-type': 'application/x-www-form-urlencoded',
+    },
+    body,
+  })
+  return tokenSetFromResponse(asRecord(await expectProviderOk('x', response)))
 }
 
 function xData(response: Record<string, unknown>): Record<string, unknown> {
@@ -85,20 +100,13 @@ export function createXAdapter(config: XConfig): PlatformAdapter {
         code,
       })
       if (codeVerifier) body.set('code_verifier', codeVerifier)
-      const response = await fetch(`${API_BASE}/oauth2/token`, {
-        method: 'POST',
-        headers: { authorization: `Basic ${btoa(`${config.clientId}:${config.clientSecret}`)}` },
-        body,
-      })
-      return tokenSetFromResponse(asRecord(await expectProviderOk('x', response)))
+      return requestToken(config, body)
     },
     async refreshToken({ refreshToken }) {
-      const response = await fetch(`${API_BASE}/oauth2/token`, {
-        method: 'POST',
-        headers: { authorization: `Basic ${btoa(`${config.clientId}:${config.clientSecret}`)}` },
-        body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken }),
-      })
-      return tokenSetFromResponse(asRecord(await expectProviderOk('x', response)))
+      return requestToken(
+        config,
+        new URLSearchParams({ client_id: config.clientId, grant_type: 'refresh_token', refresh_token: refreshToken }),
+      )
     },
     async fetchAccount({ accessToken }) {
       const response = await fetch(`${API_BASE}/users/me`, { headers: { authorization: `Bearer ${accessToken}` } })
