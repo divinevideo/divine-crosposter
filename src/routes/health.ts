@@ -634,11 +634,12 @@ function renderHome(env: Env): string {
       const RETURN_KEY = 'divine_crossposter_return_v1';
       const PROFILE_RELAYS = ['wss://relay.divine.video', 'wss://purplepag.es', 'wss://relay.damus.io'];
       const platforms = JSON.parse(document.getElementById('platform-data').textContent || '[]');
-      let session = null;
+      let session = loadSession();
       let pubkey = null;
       let profile = null;
       let connections = [];
       let preferences = [];
+      let accountLoaded = false;
 
       function $(id) {
         return document.getElementById(id);
@@ -851,6 +852,7 @@ function renderHome(env: Env): string {
         profile = null;
         connections = [];
         preferences = [];
+        accountLoaded = false;
         localStorage.removeItem(SESSION_KEY);
         renderAuthControls();
         renderAccount();
@@ -999,7 +1001,11 @@ function renderHome(env: Env): string {
         const list = $('preference-list');
         if (!list) return;
         if (!session) {
-          list.innerHTML = '<div class="connect-row"><span><strong>Login first</strong><small>Crossposting settings appear after you sign in with Divine.</small></span></div>';
+          list.innerHTML = '<div class="connect-row"><span><strong>Sign in to get started</strong><small>Your per-platform settings live here once you sign in.</small></span></div>';
+          return;
+        }
+        if (!accountLoaded) {
+          list.innerHTML = '<div class="connect-row"><span><strong>Loading…</strong><small>Fetching your crossposting settings.</small></span></div>';
           return;
         }
         list.innerHTML = platforms.map((platform) => {
@@ -1052,6 +1058,7 @@ function renderHome(env: Env): string {
           api('/connections'),
           api('/preferences'),
         ]);
+        accountLoaded = true;
         connections = connectionData.connections || [];
         preferences = preferenceData.preferences || [];
         renderConnectRows();
