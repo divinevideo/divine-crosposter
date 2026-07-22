@@ -3,6 +3,7 @@ export type PreferenceMode = 'manual' | 'automatic' | 'disabled'
 export type JobStatus =
   | 'queued'
   | 'uploading'
+  | 'dispatching'
   | 'processing'
   | 'posted'
   | 'failed'
@@ -20,6 +21,7 @@ export type ErrorCode =
   | 'not_owner'
   | 'not_eligible'
   | 'unknown_platform_error'
+  | 'ambiguous_post_result'
 
 export type Env = {
   DB: D1Database

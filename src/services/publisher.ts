@@ -3,7 +3,7 @@ import { getConnection, markConnectionNeedsReauth, upsertConnection } from '../d
 import { claimJobForPublish, claimJobForStatusPoll, getJob, updateJobStatus } from '../db/jobs'
 import { getAdapter } from '../platforms/registry'
 import { PlatformAdapterError, asRecord } from '../platforms/adapter'
-import type { Env, ErrorCode, JobAttemptRecord, JobRecord, JobStatus } from '../types'
+import type { Env, ErrorCode, JobAttemptRecord, JobRecord, JobStatus, Platform } from '../types'
 import { decryptToken, encryptToken, generateRandomId } from '../utils/crypto'
 import { sanitizeProviderMetadata } from '../utils/provider-metadata'
 
@@ -41,10 +41,28 @@ function retryableCode(code: ErrorCode): boolean {
   return code === 'rate_limited' || code === 'unknown_platform_error' || code === 'processing_timeout'
 }
 
+export function providerCheckpoint(platform: Platform, value: unknown): Record<string, unknown> | null {
+  const source = asRecord(value)
+  const allowedKeys: Record<Platform, readonly string[]> = {
+    instagram: ['id', 'creationId', 'externalAccountId'],
+    tiktok: ['publish_id'],
+    x: ['mediaId', 'caption'],
+    youtube: ['id'],
+  }
+  const checkpoint: Record<string, unknown> = {}
+  for (const key of allowedKeys[platform]) {
+    if (typeof source[key] === 'string' && (key === 'caption' || source[key].trim().length > 0)) {
+      checkpoint[key] = source[key]
+    }
+  }
+  return Object.keys(checkpoint).length > 0 ? checkpoint : null
+}
+
 async function addAttempt(
   env: Env,
   input: {
     jobId: string
+    platform: Platform
     status: JobStatus
     errorCode?: ErrorCode | null
     errorMessage?: string | null
@@ -53,6 +71,7 @@ async function addAttempt(
     now: number
   },
 ): Promise<void> {
+  const checkpoint = providerCheckpoint(input.platform, input.providerResponse)
   const attempt: JobAttemptRecord = {
     id: `attempt_${generateRandomId()}`,
     jobId: input.jobId,
@@ -60,8 +79,7 @@ async function addAttempt(
     errorCode: input.errorCode ?? null,
     errorMessage: input.errorMessage ?? null,
     providerStatus: input.providerStatus ?? null,
-    providerResponseJson:
-      input.providerResponse === undefined || input.providerResponse === null ? null : safeJson(input.providerResponse),
+    providerResponseJson: checkpoint ? safeJson(checkpoint) : null,
     createdAt: input.now,
   }
   await recordAttempt(env.DB, attempt)
@@ -130,11 +148,11 @@ async function accessTokenForJob(env: Env, job: JobRecord, now: number): Promise
       })
       await addAttempt(env, {
         jobId: job.id,
+        platform: job.platform,
         status: 'needs_reauth',
         errorCode: 'needs_reauth',
         errorMessage: error.message,
         providerStatus: error.providerStatus ?? null,
-        providerResponse: error.providerResponse,
         now,
       })
       return null
@@ -143,28 +161,39 @@ async function accessTokenForJob(env: Env, job: JobRecord, now: number): Promise
   }
 }
 
-function latestProviderResponse(attempts: JobAttemptRecord[]): Record<string, unknown> {
+function latestProviderResponse(platform: Platform, attempts: JobAttemptRecord[]): Record<string, unknown> {
   for (let index = attempts.length - 1; index >= 0; index -= 1) {
     const json = attempts[index].providerResponseJson
     if (!json) continue
     try {
-      return asRecord(JSON.parse(json))
+      const checkpoint = providerCheckpoint(platform, JSON.parse(json))
+      if (checkpoint) return checkpoint
     } catch {
-      return {}
+      continue
     }
   }
   return {}
 }
 
 function pollProviderResponse(job: JobRecord, attempts: JobAttemptRecord[]): Record<string, unknown> {
-  const latest = latestProviderResponse(attempts)
-  if (Object.keys(latest).length > 0) return latest
-  if (!job.externalPostId) return {}
+  const latest = latestProviderResponse(job.platform, attempts)
+  if (!job.externalPostId) return latest
 
   if (job.platform === 'x') {
-    return { mediaId: job.externalPostId, caption: job.caption }
+    return { mediaId: job.externalPostId, caption: job.caption, ...latest }
   }
-  return { publish_id: job.externalPostId }
+  if (job.platform === 'tiktok') {
+    return { publish_id: job.externalPostId, ...latest }
+  }
+  if (job.platform === 'instagram') {
+    return {
+      id: job.externalPostId,
+      creationId: job.externalPostId,
+      externalAccountId: job.externalAccountId,
+      ...latest,
+    }
+  }
+  return { id: job.externalPostId, ...latest }
 }
 
 async function scheduleRetry(env: Env, job: JobRecord, code: ErrorCode, message: string, now: number): Promise<number | null> {
@@ -209,8 +238,9 @@ async function markResult(
 ): Promise<ProcessCrosspostResult> {
   await addAttempt(env, {
     jobId: job.id,
+    platform: job.platform,
     status: result.status,
-    providerResponse: result.providerResponse,
+    providerResponse: result.status === 'processing' ? result.providerResponse : undefined,
     now,
   })
 
@@ -253,11 +283,11 @@ async function markResult(
 async function handleProviderError(env: Env, job: JobRecord, error: PlatformAdapterError, now: number): Promise<ProcessCrosspostResult> {
   await addAttempt(env, {
     jobId: job.id,
+    platform: job.platform,
     status: error.code === 'needs_reauth' ? 'needs_reauth' : 'failed',
     errorCode: error.code,
     errorMessage: error.message,
     providerStatus: error.providerStatus ?? null,
-    providerResponse: error.providerResponse,
     now,
   })
 
@@ -299,11 +329,11 @@ async function handleProcessingProviderError(
 ): Promise<ProcessCrosspostResult> {
   await addAttempt(env, {
     jobId: job.id,
+    platform: job.platform,
     status: error.code === 'needs_reauth' ? 'needs_reauth' : 'processing',
     errorCode: error.code,
     errorMessage: error.message,
     providerStatus: error.providerStatus ?? null,
-    providerResponse: error.providerResponse,
     now,
   })
 
@@ -337,10 +367,44 @@ async function handleProcessingProviderError(
   throw new PublisherRetryError(delay)
 }
 
+async function handleAmbiguousPostResult(
+  env: Env,
+  job: JobRecord,
+  error: unknown,
+  now: number,
+): Promise<ProcessCrosspostResult> {
+  const providerStatus = error instanceof PlatformAdapterError ? (error.providerStatus ?? null) : null
+  const errorMessage = 'X post result is ambiguous after dispatch'
+  await addAttempt(env, {
+    jobId: job.id,
+    platform: job.platform,
+    status: 'failed',
+    errorCode: 'ambiguous_post_result',
+    errorMessage,
+    providerStatus,
+    now,
+  })
+  await updateJobStatus(env.DB, {
+    id: job.id,
+    status: 'failed',
+    updatedAt: now,
+    errorCode: 'ambiguous_post_result',
+    errorMessage,
+    externalPostId: null,
+    externalPostUrl: null,
+    nextRetryAt: null,
+  })
+  return { status: 'failed' }
+}
+
 export async function processCrosspostJob(env: Env, jobId: string, options: { now?: number } = {}): Promise<ProcessCrosspostResult> {
   const now = options.now ?? nowSeconds()
   const existing = await getJob(env.DB, jobId)
   if (!existing) return { status: 'not_found' }
+
+  if (existing.status === 'dispatching' || existing.errorCode === 'ambiguous_post_result') {
+    return { status: existing.status }
+  }
 
   if (existing.expiresAt <= now) {
     await updateJobStatus(env.DB, {
@@ -374,6 +438,19 @@ export async function processCrosspostJob(env: Env, jobId: string, options: { no
     return { status: existing.status }
   }
 
+  let dispatchFenceRaised = false
+  const beforeExternalPost = async (): Promise<void> => {
+    await updateJobStatus(env.DB, {
+      id: job.id,
+      status: 'dispatching',
+      updatedAt: now,
+      errorCode: null,
+      errorMessage: null,
+      nextRetryAt: null,
+    })
+    dispatchFenceRaised = true
+  }
+
   try {
     const accessToken = await accessTokenForJob(env, job, now)
     if (!accessToken) return { status: 'needs_reauth' }
@@ -388,6 +465,7 @@ export async function processCrosspostJob(env: Env, jobId: string, options: { no
       const result = await adapter.pollPublishStatus({
         accessToken,
         providerResponse: pollProviderResponse(job, attempts),
+        beforeExternalPost,
       })
       return markResult(env, job, result, now, true)
     }
@@ -398,9 +476,13 @@ export async function processCrosspostJob(env: Env, jobId: string, options: { no
       mediaHash: job.sourceMediaHash,
       caption: job.caption,
       externalAccountId: job.externalAccountId,
+      beforeExternalPost,
     })
     return markResult(env, job, result, now)
   } catch (error) {
+    if (dispatchFenceRaised) {
+      return handleAmbiguousPostResult(env, job, error, now)
+    }
     if (error instanceof PlatformAdapterError) {
       return existing.status === 'processing'
         ? handleProcessingProviderError(env, job, error, now)

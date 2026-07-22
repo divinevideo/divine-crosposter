@@ -14,9 +14,11 @@ export type CrosspostJobsResult = {
   jobs: JobRecord[]
 }
 
+export type PublicJobAttempt = Omit<JobAttemptRecord, 'providerResponseJson'>
+
 export type JobWithAttemptsResult = {
   job: JobRecord
-  attempts: JobAttemptRecord[]
+  attempts: PublicJobAttempt[]
 }
 
 type SourceSnapshot = {
@@ -256,5 +258,16 @@ export async function getCrosspostJob(
   if (!job) {
     throw new HttpError(404, 'not_found', 'job not found')
   }
-  return { job, attempts: await listAttempts(env.DB, job.id) }
+  const attempts = (await listAttempts(env.DB, job.id)).map(
+    ({ id, jobId, status, errorCode, errorMessage, providerStatus, createdAt }): PublicJobAttempt => ({
+      id,
+      jobId,
+      status,
+      errorCode,
+      errorMessage,
+      providerStatus,
+      createdAt,
+    }),
+  )
+  return { job, attempts }
 }

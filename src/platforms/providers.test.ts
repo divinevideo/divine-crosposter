@@ -22,6 +22,24 @@ function bodyAsParams(call: unknown[]): URLSearchParams {
   return init.body as URLSearchParams
 }
 
+function bodyAsFormData(call: unknown[]): FormData {
+  const init = call[1] as RequestInit
+  expect(init.body).toBeInstanceOf(FormData)
+  return init.body as FormData
+}
+
+function formText(form: FormData, name: string): string | null {
+  const value = form.get(name)
+  return typeof value === 'string' ? value : null
+}
+
+function formBlob(form: FormData, name: string): Blob {
+  const value: unknown = form.get(name)
+  expect(value).toBeInstanceOf(Blob)
+  if (!(value instanceof Blob)) throw new Error(`${name} is not a Blob`)
+  return value
+}
+
 async function bodyAsJson(call: unknown[]): Promise<Record<string, unknown>> {
   const init = call[1] as RequestInit
   return JSON.parse(String(init.body)) as Record<string, unknown>
@@ -405,30 +423,64 @@ describe('provider adapters', () => {
     })
   })
 
-  it('uploads X video bytes with INIT, APPEND, FINALIZE, then creates a post', async () => {
+  it('exports the X upload chunk size as exactly 5 MiB', async () => {
+    await expect(import('./x')).resolves.toMatchObject({ X_UPLOAD_CHUNK_BYTES: 5 * 1024 * 1024 })
+  })
+
+  it('uploads X video bytes with v2 multipart INIT, APPEND, FINALIZE, then creates a post behind the fence', async () => {
     const adapter = createXAdapter({ clientId: 'client', clientSecret: 'secret' })
+    const events: string[] = []
     fetchMock
       .mockResolvedValueOnce(new Response(VIDEO_BYTES))
-      .mockResolvedValueOnce(Response.json({ data: { id: 'media-id' } }))
+      .mockResolvedValueOnce(Response.json({ data: { id: 'media-id', init_secret: 'init-sentinel' } }))
       .mockResolvedValueOnce(new Response(null, { status: 204 }))
-      .mockResolvedValueOnce(Response.json({ data: { id: 'media-id' } }))
-      .mockResolvedValueOnce(Response.json({ data: { id: 'tweet-id' } }))
+      .mockResolvedValueOnce(Response.json({ data: { id: 'media-id', finalize_secret: 'finalize-sentinel' } }))
+      .mockImplementationOnce(async () => {
+        events.push('tweet-fetch')
+        return Response.json({ data: { id: 'tweet-id', tweet_secret: 'tweet-sentinel' } })
+      })
 
-    await expect(adapter.publishVideo(publishInput())).resolves.toMatchObject({
+    await expect(
+      adapter.publishVideo({
+        ...publishInput(),
+        beforeExternalPost: async () => {
+          events.push('fence')
+        },
+      }),
+    ).resolves.toEqual({
       status: 'posted',
       externalPostId: 'tweet-id',
+      externalPostUrl: 'https://x.com/i/web/status/tweet-id',
+      providerResponse: {},
     })
 
     expect(fetchMock).toHaveBeenNthCalledWith(1, 'https://cdn.divine.video/video.mp4')
     expect(String(fetchMock.mock.calls[1][0])).toBe('https://api.x.com/2/media/upload')
-    expect(bodyAsParams(fetchMock.mock.calls[1]).get('command')).toBe('INIT')
-    expect(bodyAsParams(fetchMock.mock.calls[1]).get('total_bytes')).toBe(String(VIDEO_BYTES.byteLength))
-    expect(String(fetchMock.mock.calls[2][0])).toBe('https://api.x.com/2/media/upload/media-id/append')
-    await expect(bodyAsJson(fetchMock.mock.calls[2])).resolves.toMatchObject({
-      media: expect.any(String),
-      segment_index: 0,
+    const init = bodyAsFormData(fetchMock.mock.calls[1])
+    expect(
+      Object.fromEntries([...init.entries()].filter((entry): entry is [string, string] => typeof entry[1] === 'string')),
+    ).toEqual({
+      command: 'INIT',
+      total_bytes: String(VIDEO_BYTES.byteLength),
+      media_type: 'video/mp4',
+      media_category: 'tweet_video',
     })
-    expect(String(fetchMock.mock.calls[3][0])).toBe('https://api.x.com/2/media/upload/media-id/finalize')
+    expect(new Headers((fetchMock.mock.calls[1][1] as RequestInit).headers).has('content-type')).toBe(false)
+
+    expect(String(fetchMock.mock.calls[2][0])).toBe('https://api.x.com/2/media/upload')
+    const append = bodyAsFormData(fetchMock.mock.calls[2])
+    expect(formText(append, 'command')).toBe('APPEND')
+    expect(formText(append, 'media_id')).toBe('media-id')
+    expect(formText(append, 'segment_index')).toBe('0')
+    const media = formBlob(append, 'media')
+    expect(media.size).toBe(VIDEO_BYTES.byteLength)
+    expect(Reflect.get(media, 'name')).toBe('video-chunk')
+    expect(new Headers((fetchMock.mock.calls[2][1] as RequestInit).headers).has('content-type')).toBe(false)
+
+    expect(String(fetchMock.mock.calls[3][0])).toBe('https://api.x.com/2/media/upload')
+    const finalize = bodyAsFormData(fetchMock.mock.calls[3])
+    expect(Object.fromEntries(finalize.entries())).toEqual({ command: 'FINALIZE', media_id: 'media-id' })
+    expect(new Headers((fetchMock.mock.calls[3][1] as RequestInit).headers).has('content-type')).toBe(false)
     expect(fetchMock).toHaveBeenNthCalledWith(
       5,
       'https://api.x.com/2/tweets',
@@ -438,33 +490,201 @@ describe('provider adapters', () => {
       text: 'caption',
       media: { media_ids: ['media-id'] },
     })
+    expect(events).toEqual(['fence', 'tweet-fetch'])
   })
 
-  it('returns processing for X finalize processing_info and posts after status succeeds', async () => {
+  it('splits X APPEND multipart media into bounded sequential 5 MiB chunks', async () => {
+    const adapter = createXAdapter({ clientId: 'client', clientSecret: 'secret' })
+    const bytes = new Uint8Array(5 * 1024 * 1024 + 1)
+    fetchMock
+      .mockResolvedValueOnce(new Response(bytes))
+      .mockResolvedValueOnce(Response.json({ data: { id: 'media-id' } }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(Response.json({ data: { id: 'media-id' } }))
+      .mockResolvedValueOnce(Response.json({ data: { id: 'tweet-id' } }))
+
+    await adapter.publishVideo({ ...publishInput(), beforeExternalPost: async () => undefined })
+
+    const appends = fetchMock.mock.calls.filter((call) => {
+      const init = call[1] as RequestInit | undefined
+      return init?.body instanceof FormData && formText(init.body, 'command') === 'APPEND'
+    })
+    expect(appends).toHaveLength(2)
+    expect(appends.map((call) => formText(bodyAsFormData(call), 'segment_index'))).toEqual(['0', '1'])
+    expect(appends.map((call) => formBlob(bodyAsFormData(call), 'media').size)).toEqual([5 * 1024 * 1024, 1])
+  })
+
+  it.each(['pending', 'in_progress'])('returns a minimized X checkpoint when FINALIZE is %s', async (state) => {
+    const adapter = createXAdapter({ clientId: 'client', clientSecret: 'secret' })
+    fetchMock
+      .mockResolvedValueOnce(new Response(VIDEO_BYTES))
+      .mockResolvedValueOnce(Response.json({ data: { id: 'media-id', init_secret: 'init-sentinel' } }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(
+        Response.json({ data: { id: 'media-id', processing_info: { state, nested_secret: 'finalize-sentinel' } } }),
+      )
+
+    await expect(adapter.publishVideo(publishInput())).resolves.toEqual({
+      status: 'processing',
+      externalPostId: 'media-id',
+      providerResponse: { mediaId: 'media-id', caption: 'caption' },
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+  })
+
+  it('polls X STATUS on the exact v2 endpoint and posts after succeeded behind the fence', async () => {
+    const adapter = createXAdapter({ clientId: 'client', clientSecret: 'secret' })
+    const events: string[] = []
+    fetchMock
+      .mockResolvedValueOnce(
+        Response.json({ data: { id: 'media-id', processing_info: { state: 'succeeded', status_secret: 'status-sentinel' } } }),
+      )
+      .mockImplementationOnce(async () => {
+        events.push('tweet-fetch')
+        return Response.json({ data: { id: 'tweet-id' } })
+      })
+
+    await expect(
+      adapter.pollPublishStatus?.({
+        accessToken: 'access',
+        providerResponse: { mediaId: 'media-id', caption: 'caption' },
+        beforeExternalPost: async () => {
+          events.push('fence')
+        },
+      }),
+    ).resolves.toEqual({
+      status: 'posted',
+      externalPostId: 'tweet-id',
+      externalPostUrl: 'https://x.com/i/web/status/tweet-id',
+      providerResponse: {},
+    })
+
+    expect(String(fetchMock.mock.calls[0][0])).toBe('https://api.x.com/2/media/upload?command=STATUS&media_id=media-id')
+    await expect(bodyAsJson(fetchMock.mock.calls[1])).resolves.toMatchObject({
+      text: 'caption',
+      media: { media_ids: ['media-id'] },
+    })
+    expect(events).toEqual(['fence', 'tweet-fetch'])
+  })
+
+  it.each(['pending', 'in_progress'])('keeps polling when X STATUS is %s', async (state) => {
+    const adapter = createXAdapter({ clientId: 'client', clientSecret: 'secret' })
+    fetchMock.mockResolvedValueOnce(
+      Response.json({
+        data: {
+          id: 'media-id',
+          processing_info: { state, token: 'status-processing-token-sentinel' },
+        },
+      }),
+    )
+
+    await expect(
+      adapter.pollPublishStatus?.({
+        accessToken: 'access',
+        providerResponse: { mediaId: 'media-id', caption: 'caption' },
+      }),
+    ).resolves.toEqual({
+      status: 'processing',
+      externalPostId: 'media-id',
+      providerResponse: { mediaId: 'media-id', caption: 'caption' },
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    ['FINALIZE', 'failed', 'media_rejected'],
+    ['FINALIZE', 'mystery', 'unknown_platform_error'],
+    ['FINALIZE', '', 'unknown_platform_error'],
+    ['STATUS', 'failed', 'media_rejected'],
+    ['STATUS', 'mystery', 'unknown_platform_error'],
+    ['STATUS', '', 'unknown_platform_error'],
+  ])('fails closed for X %s processing state %j as %s', async (phase, state, code) => {
+    const adapter = createXAdapter({ clientId: 'client', clientSecret: 'secret' })
+    const processingInfo = state === '' ? { provider_secret: `${phase}-sentinel` } : { state, provider_secret: `${phase}-sentinel` }
+    if (phase === 'FINALIZE') {
+      fetchMock
+        .mockResolvedValueOnce(new Response(VIDEO_BYTES))
+        .mockResolvedValueOnce(Response.json({ data: { id: 'media-id' } }))
+        .mockResolvedValueOnce(new Response(null, { status: 204 }))
+        .mockResolvedValueOnce(Response.json({ data: { id: 'media-id', processing_info: processingInfo } }))
+      await expect(adapter.publishVideo(publishInput())).rejects.toMatchObject({ code, providerResponse: undefined })
+    } else {
+      fetchMock.mockResolvedValueOnce(Response.json({ data: { id: 'media-id', processing_info: processingInfo } }))
+      await expect(
+        adapter.pollPublishStatus?.({
+          accessToken: 'access',
+          providerResponse: { mediaId: 'media-id', caption: 'caption' },
+          beforeExternalPost: async () => undefined,
+        }),
+      ).rejects.toMatchObject({ code, providerResponse: undefined })
+    }
+    expect(fetchMock.mock.calls.some((call) => String(call[0]) === 'https://api.x.com/2/tweets')).toBe(false)
+  })
+
+  it.each([
+    ['missing', { data: {} }],
+    ['empty', { data: { id: '' } }],
+  ])('rejects %s X INIT media id before APPEND without retaining the provider body', async (_case, response) => {
+    const adapter = createXAdapter({ clientId: 'client', clientSecret: 'secret' })
+    fetchMock
+      .mockResolvedValueOnce(new Response(VIDEO_BYTES))
+      .mockResolvedValueOnce(Response.json({ ...response, raw_token: 'init-media-id-sentinel' }))
+
+    await expect(adapter.publishVideo(publishInput())).rejects.toMatchObject({
+      code: 'unknown_platform_error',
+      providerResponse: undefined,
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('requires the durable callback before X tweet creation and never fetches the tweet without it', async () => {
     const adapter = createXAdapter({ clientId: 'client', clientSecret: 'secret' })
     fetchMock
       .mockResolvedValueOnce(new Response(VIDEO_BYTES))
       .mockResolvedValueOnce(Response.json({ data: { id: 'media-id' } }))
       .mockResolvedValueOnce(new Response(null, { status: 204 }))
-      .mockResolvedValueOnce(Response.json({ data: { id: 'media-id', processing_info: { state: 'pending' } } }))
+      .mockResolvedValueOnce(Response.json({ data: { id: 'media-id' } }))
 
-    const processing = await adapter.publishVideo(publishInput())
-    expect(processing).toMatchObject({ status: 'processing', externalPostId: 'media-id' })
+    await expect(adapter.publishVideo(publishInput())).rejects.toMatchObject({ code: 'unknown_platform_error' })
     expect(fetchMock).toHaveBeenCalledTimes(4)
+  })
 
+  it('does not create an X tweet when the durable callback rejects', async () => {
+    const adapter = createXAdapter({ clientId: 'client', clientSecret: 'secret' })
     fetchMock
-      .mockResolvedValueOnce(Response.json({ data: { id: 'media-id', processing_info: { state: 'succeeded' } } }))
-      .mockResolvedValueOnce(Response.json({ data: { id: 'tweet-id' } }))
+      .mockResolvedValueOnce(new Response(VIDEO_BYTES))
+      .mockResolvedValueOnce(Response.json({ data: { id: 'media-id' } }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(Response.json({ data: { id: 'media-id' } }))
 
     await expect(
-      adapter.pollPublishStatus?.({ accessToken: 'access', providerResponse: processing.providerResponse }),
-    ).resolves.toMatchObject({ status: 'posted', externalPostId: 'tweet-id' })
+      adapter.publishVideo({
+        ...publishInput(),
+        beforeExternalPost: async () => {
+          throw new Error('fence failed')
+        },
+      }),
+    ).rejects.toThrow('fence failed')
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+  })
 
-    expect(String(fetchMock.mock.calls[4][0])).toBe('https://api.x.com/2/media/upload?command=STATUS&media_id=media-id')
-    await expect(bodyAsJson(fetchMock.mock.calls[5])).resolves.toMatchObject({
-      text: 'caption',
-      media: { media_ids: ['media-id'] },
-    })
+  it.each([
+    ['missing', { data: { tweet_secret: 'missing-tweet-id-sentinel' } }],
+    ['empty', { data: { id: '', tweet_secret: 'empty-tweet-id-sentinel' } }],
+  ])('rejects a 2xx X tweet response with %s id and does not report it as posted', async (_case, response) => {
+    const adapter = createXAdapter({ clientId: 'client', clientSecret: 'secret' })
+    fetchMock
+      .mockResolvedValueOnce(new Response(VIDEO_BYTES))
+      .mockResolvedValueOnce(Response.json({ data: { id: 'media-id' } }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(Response.json({ data: { id: 'media-id' } }))
+      .mockResolvedValueOnce(Response.json(response))
+
+    await expect(
+      adapter.publishVideo({ ...publishInput(), beforeExternalPost: async () => undefined }),
+    ).rejects.toMatchObject({ code: 'unknown_platform_error', providerResponse: undefined })
+    expect(fetchMock.mock.calls.filter((call) => String(call[0]) === 'https://api.x.com/2/tweets')).toHaveLength(1)
   })
 
   it('uploads YouTube through resumable metadata start and media upload calls', async () => {

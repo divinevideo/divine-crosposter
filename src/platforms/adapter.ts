@@ -20,6 +20,13 @@ export type PublishInput = {
   mediaHash: string
   caption: string
   externalAccountId: string
+  beforeExternalPost?: () => Promise<void>
+}
+
+export type PollPublishInput = {
+  accessToken: string
+  providerResponse: Record<string, unknown>
+  beforeExternalPost?: () => Promise<void>
 }
 
 export type PublishResult = {
@@ -36,7 +43,7 @@ export interface PlatformAdapter {
   refreshToken(input: { refreshToken: string }): Promise<TokenSet>
   fetchAccount(input: { accessToken: string }): Promise<PlatformAccount>
   publishVideo(input: PublishInput): Promise<PublishResult>
-  pollPublishStatus?(input: { accessToken: string; providerResponse: Record<string, unknown> }): Promise<PublishResult>
+  pollPublishStatus?(input: PollPublishInput): Promise<PublishResult>
   revoke?(input: { accessToken: string; refreshToken?: string }): Promise<void>
 }
 
