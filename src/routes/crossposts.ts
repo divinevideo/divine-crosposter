@@ -42,6 +42,7 @@ crossposts.post('/videos/:event_id/crossposts', async (c) => {
       }),
     )
   } catch (error) {
+    console.error(`manual crosspost failed for event ${c.req.param('event_id')}`, error)
     return errorResponse(error)
   }
 })
