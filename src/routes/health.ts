@@ -615,6 +615,14 @@ function renderHome(env: Env): string {
               <div class="preference-list" id="preference-list"></div>
             </div>
           </div>
+
+          <div class="panel">
+            <div class="flow-section">
+              <h2>Post a video now.</h2>
+              <p>Your recent Divine videos. Send one to a connected platform whenever you like — same job either way, this is just the manual button.</p>
+              <div class="connect-list" id="video-list"></div>
+            </div>
+          </div>
         </section>
       </main>
 
@@ -1041,6 +1049,7 @@ function renderHome(env: Env): string {
           renderAccount();
           renderConnectRows();
           renderPreferenceRows();
+          renderVideoRows();
           return;
         }
         pubkey = await keycastPublicKey();
@@ -1063,6 +1072,109 @@ function renderHome(env: Env): string {
         preferences = preferenceData.preferences || [];
         renderConnectRows();
         renderPreferenceRows();
+        loadVideos().catch(() => undefined);
+      }
+
+      const FUNNELCAKE_BASE = 'https://api.divine.video';
+      let videos = [];
+      const videoJobs = {};
+      const videoPolls = {};
+
+      async function loadVideos() {
+        if (!pubkey) return;
+        try {
+          const resp = await fetch(FUNNELCAKE_BASE + '/api/v2/users/' + encodeURIComponent(pubkey) + '/videos?limit=10');
+          const data = await resp.json().catch(() => ({}));
+          videos = Array.isArray(data.data) ? data.data : [];
+        } catch {
+          videos = [];
+        }
+        renderVideoRows();
+        videos.forEach((video) => pollJobs(video.id, { once: true }));
+      }
+
+      function jobLabel(job) {
+        if (job.status === 'posted') {
+          const link = job.externalPostUrl
+            ? ' <a href="' + escapeHtml(job.externalPostUrl) + '" target="_blank" rel="noopener">View post</a>'
+            : '';
+          return 'Posted to ' + escapeHtml(platformName(job.platform)) + '.' + link;
+        }
+        if (job.status === 'failed') {
+          return escapeHtml(platformName(job.platform)) + ' failed: ' + escapeHtml(job.errorMessage || job.errorCode || 'unknown error');
+        }
+        if (job.status === 'needs_reauth') {
+          return escapeHtml(platformName(job.platform)) + ' needs you to reconnect the account.';
+        }
+        if (job.status === 'skipped') {
+          return escapeHtml(platformName(job.platform)) + ' skipped (job expired).';
+        }
+        return 'Sending to ' + escapeHtml(platformName(job.platform)) + '… (' + escapeHtml(job.status) + ')';
+      }
+
+      function renderVideoRows() {
+        const list = $('video-list');
+        if (!list) return;
+        if (!session) {
+          list.innerHTML = '<div class="connect-row"><span><strong>Sign in to get started</strong><small>Your recent Divine videos show up here.</small></span></div>';
+          return;
+        }
+        const connected = connections.filter((item) => item.status === 'connected');
+        if (accountLoaded && connected.length === 0) {
+          list.innerHTML = '<div class="connect-row"><span><strong>Connect a platform first</strong><small>Once a platform is connected you can post any video from here.</small></span></div>';
+          return;
+        }
+        if (videos.length === 0) {
+          list.innerHTML = '<div class="connect-row"><span><strong>No videos yet</strong><small>Publish a video on Divine and it appears here.</small></span></div>';
+          return;
+        }
+        list.innerHTML = videos.map((video) => {
+          const title = video.title || 'Untitled video';
+          const when = video.created_at ? new Date(video.created_at * 1000).toLocaleDateString() : '';
+          const jobs = videoJobs[video.id] || [];
+          const statusLine = jobs.length
+            ? '<small>' + jobs.map(jobLabel).join(' ') + '</small>'
+            : '';
+          const buttons = connected.map((connection) => {
+            const busy = jobs.some((job) => job.platform === connection.platform &&
+              (job.status === 'queued' || job.status === 'uploading' || job.status === 'processing'));
+            return '<button class="mini-button" data-crosspost-video="' + escapeHtml(video.id) + '" data-crosspost-platform="' + escapeHtml(connection.platform) + '" ' + (busy ? 'disabled' : '') + '>' +
+              (busy ? 'Sending…' : 'Post to ' + escapeHtml(platformName(connection.platform))) + '</button>';
+          }).join(' ');
+          return '<div class="connect-row">' +
+            '<span><strong>' + escapeHtml(title) + '</strong><small>' + escapeHtml(when) + '</small>' + statusLine + '</span>' +
+            '<span>' + buttons + '</span>' +
+          '</div>';
+        }).join('');
+      }
+
+      async function pollJobs(videoId, options = {}) {
+        try {
+          const data = await api('/videos/' + videoId + '/crossposts');
+          videoJobs[videoId] = data.jobs || [];
+          renderVideoRows();
+        } catch {
+          return;
+        }
+        if (options.once) return;
+        const active = (videoJobs[videoId] || []).some((job) =>
+          job.status === 'queued' || job.status === 'uploading' || job.status === 'processing');
+        clearTimeout(videoPolls[videoId]);
+        if (active) {
+          videoPolls[videoId] = setTimeout(() => pollJobs(videoId), 5000);
+        }
+      }
+
+      async function triggerCrosspost(videoId, platform) {
+        const data = await api('/videos/' + videoId + '/crossposts', {
+          method: 'POST',
+          body: JSON.stringify({ platforms: [platform] }),
+        });
+        videoJobs[videoId] = data.jobs || [];
+        renderVideoRows();
+        setStatus('Crosspost to ' + platformName(platform) + ' started.');
+        clearTimeout(videoPolls[videoId]);
+        videoPolls[videoId] = setTimeout(() => pollJobs(videoId), 5000);
       }
 
       async function connectPlatform(platform) {
@@ -1093,9 +1205,13 @@ function renderHome(env: Env): string {
             setStatus('Logged out.');
             renderConnectRows();
             renderPreferenceRows();
+            renderVideoRows();
           }
           if (target?.dataset?.connect) {
             await connectPlatform(target.dataset.connect);
+          }
+          if (target?.dataset?.crosspostVideo) {
+            await triggerCrosspost(target.dataset.crosspostVideo, target.dataset.crosspostPlatform);
           }
         } catch (err) {
           setStatus(err.message || 'Something broke. Try again.', 'error');
