@@ -1,6 +1,14 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { upsertConnection } from './connections'
-import { createOrGetJob, getJob, listJobsForVideo, listRunnableJobs, updateJobStatus } from './jobs'
+import {
+  claimJobForPublish,
+  createOrGetJob,
+  getJob,
+  listJobsForVideo,
+  listRunnableJobs,
+  transitionClaimToDispatching,
+  updateJobStatus,
+} from './jobs'
 import { applyMigrations, connection, job, PUBKEY_A, VIDEO_EVENT_ID } from './test-helpers'
 
 describe('job repository', () => {
@@ -143,5 +151,24 @@ describe('job repository', () => {
       nextRetryAt: null,
       updatedAt: 2_000,
     })
+  })
+
+  it('transitions only the current uploading claim token to dispatching', async () => {
+    await createOrGetJob(db, job({ id: 'job_dispatch' }))
+    const claimed = await claimJobForPublish(db, 'job_dispatch', 2_000)
+    expect(claimed).toMatchObject({ status: 'uploading', updatedAt: 2_000 })
+
+    await expect(transitionClaimToDispatching(db, 'job_dispatch', 1_999, 2_001)).resolves.toBe(false)
+    await expect(getJob(db, 'job_dispatch', PUBKEY_A)).resolves.toMatchObject({
+      status: 'uploading',
+      updatedAt: 2_000,
+    })
+
+    await expect(transitionClaimToDispatching(db, 'job_dispatch', 2_000, 2_001)).resolves.toBe(true)
+    await expect(getJob(db, 'job_dispatch', PUBKEY_A)).resolves.toMatchObject({
+      status: 'dispatching',
+      updatedAt: 2_001,
+    })
+    await expect(transitionClaimToDispatching(db, 'job_dispatch', 2_000, 2_002)).resolves.toBe(false)
   })
 })

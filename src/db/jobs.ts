@@ -192,6 +192,27 @@ export async function claimJobForStatusPoll(db: D1Database, id: string, now: num
   return row ? mapJob(row) : null
 }
 
+export async function transitionClaimToDispatching(
+  db: D1Database,
+  id: string,
+  claimUpdatedAt: number,
+  now: number,
+): Promise<boolean> {
+  const row = await firstPrepared<{ id: string }>(
+    db,
+    `UPDATE jobs
+    SET status = 'dispatching', updated_at = ?, error_code = NULL, error_message = NULL, next_retry_at = NULL
+    WHERE id = ?
+      AND status = 'uploading'
+      AND updated_at = ?
+    RETURNING id`,
+    now,
+    id,
+    claimUpdatedAt,
+  )
+  return row !== null
+}
+
 export async function listRunnableJobs(db: D1Database, now: number, limit: number): Promise<JobRecord[]> {
   const rows = await allPrepared<JobRow>(
     db,

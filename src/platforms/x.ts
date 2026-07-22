@@ -11,6 +11,8 @@ const UPLOAD_BASE = 'https://api.x.com/2/media/upload'
 const SCOPES = 'tweet.read tweet.write users.read media.write offline.access'
 
 export const X_UPLOAD_CHUNK_BYTES = 5 * 1024 * 1024
+// Keeps source bytes comfortably below the 128 MiB Worker memory ceiling, leaving room for chunks and runtime overhead.
+export const X_MAX_VIDEO_BYTES = 32 * 1024 * 1024
 
 function tokenSetFromResponse(response: Record<string, unknown>): TokenSet {
   if (typeof response.access_token !== 'string' || response.access_token.length === 0) {
@@ -42,9 +44,20 @@ function xData(response: Record<string, unknown>): Record<string, unknown> {
   return asRecord(response.data)
 }
 
-function mediaIdFromResponse(response: Record<string, unknown>): string {
+function strictId(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+function ownId(response: Record<string, unknown>, key: string): string | null {
+  if (!Object.prototype.hasOwnProperty.call(response, key)) return null
+  return strictId(response[key])
+}
+
+function mediaIdFromResponse(response: Record<string, unknown>): string | null {
   const data = xData(response)
-  return String(data.id ?? response.media_id_string ?? response.media_id ?? '')
+  return ownId(data, 'id') ?? ownId(response, 'media_id_string') ?? ownId(response, 'media_id')
 }
 
 function processingInfoFromResponse(response: Record<string, unknown>): Record<string, unknown> | null {
@@ -115,7 +128,7 @@ async function createPost(
       }),
     ),
   )
-  const id = String(asRecord(tweet.data).id ?? '').trim()
+  const id = ownId(asRecord(tweet.data), 'id')
   if (!id) {
     throw new PlatformAdapterError('x', 'unknown_platform_error', 'X tweet response missing post id', 200)
   }
@@ -166,7 +179,7 @@ export function createXAdapter(config: XConfig): PlatformAdapter {
       return { id: String(data.id ?? ''), name: String(data.username ?? data.name ?? 'X account'), metadata: body }
     },
     async publishVideo({ accessToken, videoUrl, caption, beforeExternalPost }): Promise<PublishResult> {
-      const video = await fetchVideoBytes('x', videoUrl)
+      const video = await fetchVideoBytes('x', videoUrl, X_MAX_VIDEO_BYTES)
       const init = await postMediaForm(
         accessToken,
         mediaForm({
@@ -176,7 +189,7 @@ export function createXAdapter(config: XConfig): PlatformAdapter {
           media_category: 'tweet_video',
         }),
       )
-      const mediaId = mediaIdFromResponse(init).trim()
+      const mediaId = mediaIdFromResponse(init)
       if (!mediaId) {
         throw new PlatformAdapterError('x', 'unknown_platform_error', 'X INIT response missing media id', 200)
       }
@@ -209,8 +222,11 @@ export function createXAdapter(config: XConfig): PlatformAdapter {
       return createPost(accessToken, mediaId, caption, beforeExternalPost)
     },
     async pollPublishStatus({ accessToken, providerResponse, beforeExternalPost }) {
-      const mediaId = String(providerResponse.mediaId ?? mediaIdFromResponse(providerResponse)).trim()
-      const caption = String(providerResponse.caption ?? '')
+      const mediaId = ownId(providerResponse, 'mediaId') ?? mediaIdFromResponse(providerResponse)
+      const caption =
+        Object.prototype.hasOwnProperty.call(providerResponse, 'caption') && typeof providerResponse.caption === 'string'
+          ? providerResponse.caption
+          : ''
       if (!mediaId) {
         throw new PlatformAdapterError('x', 'unknown_platform_error', 'X processing checkpoint missing media id')
       }

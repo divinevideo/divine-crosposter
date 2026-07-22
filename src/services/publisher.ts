@@ -1,6 +1,12 @@
 import { listAttempts, recordAttempt } from '../db/attempts'
 import { getConnection, markConnectionNeedsReauth, upsertConnection } from '../db/connections'
-import { claimJobForPublish, claimJobForStatusPoll, getJob, updateJobStatus } from '../db/jobs'
+import {
+  claimJobForPublish,
+  claimJobForStatusPoll,
+  getJob,
+  transitionClaimToDispatching,
+  updateJobStatus,
+} from '../db/jobs'
 import { getAdapter } from '../platforms/registry'
 import { PlatformAdapterError, asRecord } from '../platforms/adapter'
 import type { Env, ErrorCode, JobAttemptRecord, JobRecord, JobStatus, Platform } from '../types'
@@ -18,6 +24,12 @@ export type ProcessCrosspostResult = {
 export class PublisherRetryError extends Error {
   constructor(public readonly retryDelaySeconds: number) {
     super('crosspost job should be retried')
+  }
+}
+
+class PublishClaimLostError extends Error {
+  constructor() {
+    super('crosspost publish claim was lost')
   }
 }
 
@@ -51,9 +63,11 @@ export function providerCheckpoint(platform: Platform, value: unknown): Record<s
   }
   const checkpoint: Record<string, unknown> = {}
   for (const key of allowedKeys[platform]) {
-    if (typeof source[key] === 'string' && (key === 'caption' || source[key].trim().length > 0)) {
-      checkpoint[key] = source[key]
-    }
+    if (!Object.prototype.hasOwnProperty.call(source, key)) continue
+    const value = source[key]
+    if (typeof value !== 'string') continue
+    if (key === 'caption') checkpoint[key] = value
+    else if (value.trim().length > 0) checkpoint[key] = value.trim()
   }
   return Object.keys(checkpoint).length > 0 ? checkpoint : null
 }
@@ -440,14 +454,8 @@ export async function processCrosspostJob(env: Env, jobId: string, options: { no
 
   let dispatchFenceRaised = false
   const beforeExternalPost = async (): Promise<void> => {
-    await updateJobStatus(env.DB, {
-      id: job.id,
-      status: 'dispatching',
-      updatedAt: now,
-      errorCode: null,
-      errorMessage: null,
-      nextRetryAt: null,
-    })
+    const transitioned = await transitionClaimToDispatching(env.DB, job.id, job.updatedAt, now)
+    if (!transitioned) throw new PublishClaimLostError()
     dispatchFenceRaised = true
   }
 
@@ -480,6 +488,10 @@ export async function processCrosspostJob(env: Env, jobId: string, options: { no
     })
     return markResult(env, job, result, now)
   } catch (error) {
+    if (error instanceof PublishClaimLostError) {
+      const current = await getJob(env.DB, job.id)
+      return { status: current?.status ?? 'not_found' }
+    }
     if (dispatchFenceRaised) {
       return handleAmbiguousPostResult(env, job, error, now)
     }

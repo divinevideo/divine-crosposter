@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { PlatformAdapterError } from './adapter'
+import { fetchVideoBytes, PlatformAdapterError } from './adapter'
 import { createInstagramAdapter } from './instagram'
 import { createTikTokAdapter } from './tiktok'
 import { createXAdapter } from './x'
@@ -424,7 +424,10 @@ describe('provider adapters', () => {
   })
 
   it('exports the X upload chunk size as exactly 5 MiB', async () => {
-    await expect(import('./x')).resolves.toMatchObject({ X_UPLOAD_CHUNK_BYTES: 5 * 1024 * 1024 })
+    await expect(import('./x')).resolves.toMatchObject({
+      X_UPLOAD_CHUNK_BYTES: 5 * 1024 * 1024,
+      X_MAX_VIDEO_BYTES: 32 * 1024 * 1024,
+    })
   })
 
   it('uploads X video bytes with v2 multipart INIT, APPEND, FINALIZE, then creates a post behind the fence', async () => {
@@ -432,12 +435,12 @@ describe('provider adapters', () => {
     const events: string[] = []
     fetchMock
       .mockResolvedValueOnce(new Response(VIDEO_BYTES))
-      .mockResolvedValueOnce(Response.json({ data: { id: 'media-id', init_secret: 'init-sentinel' } }))
+      .mockResolvedValueOnce(Response.json({ data: { id: '  media-id  ', init_secret: 'init-sentinel' } }))
       .mockResolvedValueOnce(new Response(null, { status: 204 }))
       .mockResolvedValueOnce(Response.json({ data: { id: 'media-id', finalize_secret: 'finalize-sentinel' } }))
       .mockImplementationOnce(async () => {
         events.push('tweet-fetch')
-        return Response.json({ data: { id: 'tweet-id', tweet_secret: 'tweet-sentinel' } })
+        return Response.json({ data: { id: '  tweet-id  ', tweet_secret: 'tweet-sentinel' } })
       })
 
     await expect(
@@ -513,6 +516,69 @@ describe('provider adapters', () => {
     expect(appends).toHaveLength(2)
     expect(appends.map((call) => formText(bodyAsFormData(call), 'segment_index'))).toEqual(['0', '1'])
     expect(appends.map((call) => formBlob(bodyAsFormData(call), 'media').size)).toEqual([5 * 1024 * 1024, 1])
+  })
+
+  it('rejects an X source whose declared content length exceeds the worker-safe limit before reading it', async () => {
+    const adapter = createXAdapter({ clientId: 'client', clientSecret: 'secret' })
+    const { X_MAX_VIDEO_BYTES } = await import('./x')
+    const response = new Response(new Uint8Array([1]), {
+      headers: { 'content-length': String(X_MAX_VIDEO_BYTES + 1), 'content-type': 'video/mp4' },
+    })
+    fetchMock.mockResolvedValueOnce(response)
+
+    await expect(adapter.publishVideo(publishInput())).rejects.toMatchObject({
+      code: 'media_rejected',
+      platform: 'x',
+      providerResponse: undefined,
+    })
+    expect(response.bodyUsed).toBe(false)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('cancels an X source stream when a missing or lying content length exceeds the bound', async () => {
+    const chunk = new Uint8Array([1, 2])
+    let chunksSent = 0
+    let cancelled = false
+    const chunksUntilOverLimit = 3
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (chunksSent === chunksUntilOverLimit) {
+          controller.close()
+          return
+        }
+        chunksSent += 1
+        controller.enqueue(chunk)
+      },
+      cancel() {
+        cancelled = true
+      },
+    })
+    fetchMock.mockResolvedValueOnce(
+      new Response(body, { headers: { 'content-length': '1', 'content-type': 'video/mp4' } }),
+    )
+
+    await expect(fetchVideoBytes('x', 'https://cdn.divine.video/stream.mp4', 4)).rejects.toMatchObject({
+      code: 'media_rejected',
+    })
+    expect(chunksSent).toBe(chunksUntilOverLimit)
+    expect(cancelled).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('accepts a streamed source exactly at the configured byte bound', async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1, 2]))
+        controller.enqueue(new Uint8Array([3, 4]))
+        controller.close()
+      },
+    })
+    fetchMock.mockResolvedValueOnce(new Response(body, { headers: { 'content-type': 'video/mp4' } }))
+
+    await expect(fetchVideoBytes('x', 'https://cdn.divine.video/at-limit.mp4', 4)).resolves.toMatchObject({
+      bytes: expect.objectContaining({ byteLength: 4 }),
+      contentType: 'video/mp4',
+    })
   })
 
   it.each(['pending', 'in_progress'])('returns a minimized X checkpoint when FINALIZE is %s', async (state) => {
@@ -625,6 +691,9 @@ describe('provider adapters', () => {
   it.each([
     ['missing', { data: {} }],
     ['empty', { data: { id: '' } }],
+    ['whitespace', { data: { id: '   ' } }],
+    ['numeric', { data: { id: 123 } }],
+    ['object', { data: { id: { raw: 'object-id-sentinel' } } }],
   ])('rejects %s X INIT media id before APPEND without retaining the provider body', async (_case, response) => {
     const adapter = createXAdapter({ clientId: 'client', clientSecret: 'secret' })
     fetchMock
@@ -672,6 +741,9 @@ describe('provider adapters', () => {
   it.each([
     ['missing', { data: { tweet_secret: 'missing-tweet-id-sentinel' } }],
     ['empty', { data: { id: '', tweet_secret: 'empty-tweet-id-sentinel' } }],
+    ['whitespace', { data: { id: '   ', tweet_secret: 'whitespace-tweet-id-sentinel' } }],
+    ['numeric', { data: { id: 123, tweet_secret: 'numeric-tweet-id-sentinel' } }],
+    ['object', { data: { id: { raw: 'object-tweet-id-sentinel' } } }],
   ])('rejects a 2xx X tweet response with %s id and does not report it as posted', async (_case, response) => {
     const adapter = createXAdapter({ clientId: 'client', clientSecret: 'secret' })
     fetchMock
@@ -685,6 +757,23 @@ describe('provider adapters', () => {
       adapter.publishVideo({ ...publishInput(), beforeExternalPost: async () => undefined }),
     ).rejects.toMatchObject({ code: 'unknown_platform_error', providerResponse: undefined })
     expect(fetchMock.mock.calls.filter((call) => String(call[0]) === 'https://api.x.com/2/tweets')).toHaveLength(1)
+  })
+
+  it.each([
+    ['whitespace', '   '],
+    ['numeric', 123],
+    ['object', { raw: 'checkpoint-object-id-sentinel' }],
+  ])('rejects a %s X STATUS checkpoint media id before any provider request', async (_case, mediaId) => {
+    const adapter = createXAdapter({ clientId: 'client', clientSecret: 'secret' })
+
+    await expect(
+      adapter.pollPublishStatus?.({
+        accessToken: 'access',
+        providerResponse: { mediaId, caption: 'caption' },
+        beforeExternalPost: async () => undefined,
+      }),
+    ).rejects.toMatchObject({ code: 'unknown_platform_error', providerResponse: undefined })
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('uploads YouTube through resumable metadata start and media upload calls', async () => {
