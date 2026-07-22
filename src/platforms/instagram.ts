@@ -1,4 +1,4 @@
-import { asRecord, expectProviderOk } from './adapter'
+import { asRecord, expectProviderOk, PlatformAdapterError } from './adapter'
 import type { PlatformAccount, PlatformAdapter, PublishInput, PublishResult, TokenSet } from './adapter'
 
 type InstagramConfig = {
@@ -44,6 +44,24 @@ async function postForm(url: string, body: URLSearchParams): Promise<Record<stri
 
 async function getJson(url: URL): Promise<Record<string, unknown>> {
   return asRecord(await expectProviderOk('instagram', await fetch(url.toString())))
+}
+
+async function fetchContainerStatus(creationId: string, accessToken: string): Promise<Record<string, unknown>> {
+  const url = new URL(`${GRAPH_BASE}/${creationId}`)
+  url.searchParams.set('fields', 'status_code,status')
+  url.searchParams.set('access_token', accessToken)
+  const status = await getJson(url)
+  console.log(`instagram container ${creationId} status ${String(status.status_code ?? 'unknown')}`)
+  if (status.status_code === 'ERROR' || status.status_code === 'EXPIRED') {
+    throw new PlatformAdapterError(
+      'instagram',
+      'media_rejected',
+      `instagram rejected the video: ${String(status.status ?? status.status_code)}`,
+      undefined,
+      status,
+    )
+  }
+  return status
 }
 
 export function createInstagramAdapter(config: InstagramConfig): PlatformAdapter {
@@ -106,10 +124,7 @@ export function createInstagramAdapter(config: InstagramConfig): PlatformAdapter
       })
       const container = await postForm(`${GRAPH_BASE}/${input.externalAccountId}/media`, createBody)
       const creationId = String(container.id ?? '')
-      const statusUrl = new URL(`${GRAPH_BASE}/${creationId}`)
-      statusUrl.searchParams.set('fields', 'status_code')
-      statusUrl.searchParams.set('access_token', input.accessToken)
-      const status = await getJson(statusUrl)
+      const status = await fetchContainerStatus(creationId, input.accessToken)
 
       if (status.status_code !== 'FINISHED') {
         return {
@@ -146,10 +161,7 @@ export function createInstagramAdapter(config: InstagramConfig): PlatformAdapter
     },
     async pollPublishStatus({ accessToken, providerResponse }) {
       const creationId = instagramCreationId(providerResponse)
-      const url = new URL(`${GRAPH_BASE}/${creationId}`)
-      url.searchParams.set('fields', 'status_code')
-      url.searchParams.set('access_token', accessToken)
-      const status = await getJson(url)
+      const status = await fetchContainerStatus(creationId, accessToken)
       if (status.status_code !== 'FINISHED') {
         return {
           status: 'processing',

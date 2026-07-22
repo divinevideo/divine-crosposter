@@ -209,6 +209,23 @@ describe('provider adapters', () => {
     )
   })
 
+  it('fails an Instagram container that reports an error status', async () => {
+    const adapter = createInstagramAdapter({ clientId: 'client', clientSecret: 'secret' })
+    fetchMock.mockResolvedValueOnce(
+      Response.json({ status_code: 'ERROR', status: 'Error: video format not supported.' }),
+    )
+
+    await expect(
+      adapter.pollPublishStatus?.({
+        accessToken: 'access',
+        providerResponse: { creationId: 'container-id', externalAccountId: 'account-id' },
+      }),
+    ).rejects.toMatchObject({
+      code: 'media_rejected',
+      platform: 'instagram',
+    })
+  })
+
   it('polls an Instagram processing container and publishes when finished', async () => {
     const adapter = createInstagramAdapter({ clientId: 'client', clientSecret: 'secret' })
     fetchMock
