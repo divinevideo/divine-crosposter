@@ -129,6 +129,12 @@ export async function getJob(db: D1Database, id: string, pubkey?: string): Promi
 }
 
 export async function updateJobStatus(db: D1Database, input: UpdateJobStatusInput): Promise<void> {
+  const { assignments, bindings } = jobStatusUpdate(input)
+  bindings.push(input.id)
+  await runPrepared(db, `UPDATE jobs SET ${assignments.join(', ')} WHERE id = ?`, ...bindings)
+}
+
+function jobStatusUpdate(input: UpdateJobStatusInput): { assignments: string[]; bindings: unknown[] } {
   const assignments = ['status = ?', 'updated_at = ?']
   const bindings: unknown[] = [input.status, input.updatedAt]
 
@@ -152,8 +158,27 @@ export async function updateJobStatus(db: D1Database, input: UpdateJobStatusInpu
     bindings.push(input.retryCount)
   }
 
-  bindings.push(input.id)
-  await runPrepared(db, `UPDATE jobs SET ${assignments.join(', ')} WHERE id = ?`, ...bindings)
+  return { assignments, bindings }
+}
+
+export async function updateClaimedJobStatus(
+  db: D1Database,
+  input: UpdateJobStatusInput,
+  expected: { status: JobStatus; updatedAt: number },
+): Promise<JobRecord | null> {
+  const { assignments, bindings } = jobStatusUpdate(input)
+  const row = await firstPrepared<JobRow>(
+    db,
+    `UPDATE jobs
+    SET ${assignments.join(', ')}
+    WHERE id = ? AND status = ? AND updated_at = ?
+    RETURNING *`,
+    ...bindings,
+    input.id,
+    expected.status,
+    expected.updatedAt,
+  )
+  return row ? mapJob(row) : null
 }
 
 export async function claimJobForPublish(db: D1Database, id: string, now: number): Promise<JobRecord | null> {
@@ -198,19 +223,19 @@ export async function transitionClaimToDispatching(
   claimUpdatedAt: number,
   now: number,
 ): Promise<boolean> {
-  const row = await firstPrepared<{ id: string }>(
+  const job = await updateClaimedJobStatus(
     db,
-    `UPDATE jobs
-    SET status = 'dispatching', updated_at = ?, error_code = NULL, error_message = NULL, next_retry_at = NULL
-    WHERE id = ?
-      AND status = 'uploading'
-      AND updated_at = ?
-    RETURNING id`,
-    now,
-    id,
-    claimUpdatedAt,
+    {
+      id,
+      status: 'dispatching',
+      updatedAt: now,
+      errorCode: null,
+      errorMessage: null,
+      nextRetryAt: null,
+    },
+    { status: 'uploading', updatedAt: claimUpdatedAt },
   )
-  return row !== null
+  return job !== null
 }
 
 export async function listRunnableJobs(db: D1Database, now: number, limit: number): Promise<JobRecord[]> {

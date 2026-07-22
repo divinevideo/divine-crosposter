@@ -158,10 +158,7 @@ export async function fetchVideoBytes(
 
     const reader = response.body?.getReader()
     if (!reader) {
-      return {
-        bytes: new ArrayBuffer(0),
-        contentType: response.headers.get('content-type') ?? 'video/mp4',
-      }
+      throw new PlatformAdapterError(platform, 'media_rejected', 'source video is empty')
     }
     const chunks: Uint8Array[] = []
     let totalBytes = 0
@@ -174,6 +171,9 @@ export async function fetchVideoBytes(
         throw new PlatformAdapterError(platform, 'media_rejected', 'source video exceeds upload size limit')
       }
       chunks.push(value)
+    }
+    if (totalBytes === 0) {
+      throw new PlatformAdapterError(platform, 'media_rejected', 'source video is empty')
     }
 
     const bytes = new Uint8Array(totalBytes)

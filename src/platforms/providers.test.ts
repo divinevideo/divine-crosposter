@@ -581,6 +581,31 @@ describe('provider adapters', () => {
     })
   })
 
+  it.each([
+    ['null body', new Response(null, { headers: { 'content-type': 'video/mp4' } })],
+    [
+      'empty stream',
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.close()
+          },
+        }),
+        { headers: { 'content-type': 'video/mp4' } },
+      ),
+    ],
+  ])('rejects an X source with a %s before INIT', async (_case, response) => {
+    const adapter = createXAdapter({ clientId: 'client', clientSecret: 'secret' })
+    fetchMock.mockResolvedValueOnce(response)
+
+    await expect(adapter.publishVideo(publishInput())).rejects.toMatchObject({
+      code: 'media_rejected',
+      platform: 'x',
+      providerResponse: undefined,
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it.each(['pending', 'in_progress'])('returns a minimized X checkpoint when FINALIZE is %s', async (state) => {
     const adapter = createXAdapter({ clientId: 'client', clientSecret: 'secret' })
     fetchMock

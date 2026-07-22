@@ -5,6 +5,7 @@ import {
   claimJobForStatusPoll,
   getJob,
   transitionClaimToDispatching,
+  updateClaimedJobStatus,
   updateJobStatus,
 } from '../db/jobs'
 import { getAdapter } from '../platforms/registry'
@@ -31,6 +32,22 @@ class PublishClaimLostError extends Error {
   constructor() {
     super('crosspost publish claim was lost')
   }
+}
+
+type ClaimOwnership = {
+  status: JobStatus
+  updatedAt: number
+}
+
+async function updateOwnedJob(
+  env: Env,
+  jobId: string,
+  ownership: ClaimOwnership,
+  input: Omit<Parameters<typeof updateClaimedJobStatus>[1], 'id'>,
+): Promise<JobRecord> {
+  const updated = await updateClaimedJobStatus(env.DB, { id: jobId, ...input }, ownership)
+  if (!updated) throw new PublishClaimLostError()
+  return updated
 }
 
 function nowSeconds(): number {
@@ -99,11 +116,15 @@ async function addAttempt(
   await recordAttempt(env.DB, attempt)
 }
 
-async function accessTokenForJob(env: Env, job: JobRecord, now: number): Promise<string | null> {
+async function accessTokenForJob(
+  env: Env,
+  job: JobRecord,
+  ownership: ClaimOwnership,
+  now: number,
+): Promise<string | null> {
   const connection = await getConnection(env.DB, job.connectionId, job.pubkey)
   if (!connection || connection.status !== 'connected') {
-    await updateJobStatus(env.DB, {
-      id: job.id,
+    await updateOwnedJob(env, job.id, ownership, {
       status: 'needs_reauth',
       updatedAt: now,
       errorCode: 'needs_reauth',
@@ -114,8 +135,7 @@ async function accessTokenForJob(env: Env, job: JobRecord, now: number): Promise
 
   const adapter = getAdapter(env, job.platform)
   if (!adapter) {
-    await updateJobStatus(env.DB, {
-      id: job.id,
+    await updateOwnedJob(env, job.id, ownership, {
       status: 'failed',
       updatedAt: now,
       errorCode: 'not_connected',
@@ -152,14 +172,13 @@ async function accessTokenForJob(env: Env, job: JobRecord, now: number): Promise
     return refreshed.accessToken
   } catch (error) {
     if (error instanceof PlatformAdapterError && error.code === 'needs_reauth') {
-      await markConnectionNeedsReauth(env.DB, connection.id, now)
-      await updateJobStatus(env.DB, {
-        id: job.id,
+      await updateOwnedJob(env, job.id, ownership, {
         status: 'needs_reauth',
         updatedAt: now,
         errorCode: 'needs_reauth',
         errorMessage: error.message,
       })
+      await markConnectionNeedsReauth(env.DB, connection.id, now)
       await addAttempt(env, {
         jobId: job.id,
         platform: job.platform,
@@ -210,11 +229,17 @@ function pollProviderResponse(job: JobRecord, attempts: JobAttemptRecord[]): Rec
   return { id: job.externalPostId, ...latest }
 }
 
-async function scheduleRetry(env: Env, job: JobRecord, code: ErrorCode, message: string, now: number): Promise<number | null> {
+async function scheduleRetry(
+  env: Env,
+  job: JobRecord,
+  ownership: ClaimOwnership,
+  code: ErrorCode,
+  message: string,
+  now: number,
+): Promise<number | null> {
   const retryCount = job.retryCount + 1
   if (retryCount > MAX_RETRY_COUNT) {
-    await updateJobStatus(env.DB, {
-      id: job.id,
+    await updateOwnedJob(env, job.id, ownership, {
       status: 'failed',
       updatedAt: now,
       retryCount,
@@ -226,8 +251,7 @@ async function scheduleRetry(env: Env, job: JobRecord, code: ErrorCode, message:
   }
 
   const delay = backoffSeconds(job.retryCount)
-  await updateJobStatus(env.DB, {
-    id: job.id,
+  await updateOwnedJob(env, job.id, ownership, {
     status: code === 'processing_timeout' ? 'processing' : 'failed',
     updatedAt: now,
     retryCount,
@@ -248,19 +272,11 @@ async function markResult(
     providerResponse: Record<string, unknown>
   },
   now: number,
+  ownership: ClaimOwnership,
   countProcessingRetry = false,
 ): Promise<ProcessCrosspostResult> {
-  await addAttempt(env, {
-    jobId: job.id,
-    platform: job.platform,
-    status: result.status,
-    providerResponse: result.status === 'processing' ? result.providerResponse : undefined,
-    now,
-  })
-
   if (result.status === 'posted') {
-    await updateJobStatus(env.DB, {
-      id: job.id,
+    await updateOwnedJob(env, job.id, ownership, {
       status: 'posted',
       updatedAt: now,
       errorCode: null,
@@ -269,11 +285,31 @@ async function markResult(
       externalPostUrl: result.externalPostUrl ?? null,
       nextRetryAt: null,
     })
+    await addAttempt(env, {
+      jobId: job.id,
+      platform: job.platform,
+      status: result.status,
+      now,
+    })
     return { status: 'posted' }
   }
 
   if (countProcessingRetry) {
-    const delay = await scheduleRetry(env, job, 'processing_timeout', 'platform publish is still processing', now)
+    const delay = await scheduleRetry(
+      env,
+      job,
+      ownership,
+      'processing_timeout',
+      'platform publish is still processing',
+      now,
+    )
+    await addAttempt(env, {
+      jobId: job.id,
+      platform: job.platform,
+      status: result.status,
+      providerResponse: result.providerResponse,
+      now,
+    })
     if (delay === null) {
       return { status: 'failed' }
     }
@@ -281,8 +317,7 @@ async function markResult(
   }
 
   const delay = backoffSeconds(job.retryCount)
-  await updateJobStatus(env.DB, {
-    id: job.id,
+  await updateOwnedJob(env, job.id, ownership, {
     status: 'processing',
     updatedAt: now,
     errorCode: null,
@@ -291,46 +326,74 @@ async function markResult(
     externalPostUrl: result.externalPostUrl ?? null,
     nextRetryAt: now + delay,
   })
-  return { status: 'processing', retryDelaySeconds: delay }
-}
-
-async function handleProviderError(env: Env, job: JobRecord, error: PlatformAdapterError, now: number): Promise<ProcessCrosspostResult> {
   await addAttempt(env, {
     jobId: job.id,
     platform: job.platform,
-    status: error.code === 'needs_reauth' ? 'needs_reauth' : 'failed',
-    errorCode: error.code,
-    errorMessage: error.message,
-    providerStatus: error.providerStatus ?? null,
+    status: result.status,
+    providerResponse: result.providerResponse,
     now,
   })
+  return { status: 'processing', retryDelaySeconds: delay }
+}
 
+async function handleProviderError(
+  env: Env,
+  job: JobRecord,
+  ownership: ClaimOwnership,
+  error: PlatformAdapterError,
+  now: number,
+): Promise<ProcessCrosspostResult> {
   if (error.code === 'needs_reauth') {
-    await markConnectionNeedsReauth(env.DB, job.connectionId, now)
-    await updateJobStatus(env.DB, {
-      id: job.id,
+    await updateOwnedJob(env, job.id, ownership, {
       status: 'needs_reauth',
       updatedAt: now,
       errorCode: 'needs_reauth',
       errorMessage: error.message,
       nextRetryAt: null,
     })
+    await markConnectionNeedsReauth(env.DB, job.connectionId, now)
+    await addAttempt(env, {
+      jobId: job.id,
+      platform: job.platform,
+      status: 'needs_reauth',
+      errorCode: error.code,
+      errorMessage: error.message,
+      providerStatus: error.providerStatus ?? null,
+      now,
+    })
     return { status: 'needs_reauth' }
   }
 
   if (!retryableCode(error.code)) {
-    await updateJobStatus(env.DB, {
-      id: job.id,
+    await updateOwnedJob(env, job.id, ownership, {
       status: 'failed',
       updatedAt: now,
       errorCode: error.code,
       errorMessage: error.message,
       nextRetryAt: null,
     })
+    await addAttempt(env, {
+      jobId: job.id,
+      platform: job.platform,
+      status: 'failed',
+      errorCode: error.code,
+      errorMessage: error.message,
+      providerStatus: error.providerStatus ?? null,
+      now,
+    })
     return { status: 'failed' }
   }
 
-  const delay = await scheduleRetry(env, job, error.code, error.message, now)
+  const delay = await scheduleRetry(env, job, ownership, error.code, error.message, now)
+  await addAttempt(env, {
+    jobId: job.id,
+    platform: job.platform,
+    status: 'failed',
+    errorCode: error.code,
+    errorMessage: error.message,
+    providerStatus: error.providerStatus ?? null,
+    now,
+  })
   if (delay === null) return { status: 'failed' }
   throw new PublisherRetryError(delay)
 }
@@ -338,45 +401,61 @@ async function handleProviderError(env: Env, job: JobRecord, error: PlatformAdap
 async function handleProcessingProviderError(
   env: Env,
   job: JobRecord,
+  ownership: ClaimOwnership,
   error: PlatformAdapterError,
   now: number,
 ): Promise<ProcessCrosspostResult> {
-  await addAttempt(env, {
-    jobId: job.id,
-    platform: job.platform,
-    status: error.code === 'needs_reauth' ? 'needs_reauth' : 'processing',
-    errorCode: error.code,
-    errorMessage: error.message,
-    providerStatus: error.providerStatus ?? null,
-    now,
-  })
-
   if (error.code === 'needs_reauth') {
-    await markConnectionNeedsReauth(env.DB, job.connectionId, now)
-    await updateJobStatus(env.DB, {
-      id: job.id,
+    await updateOwnedJob(env, job.id, ownership, {
       status: 'needs_reauth',
       updatedAt: now,
       errorCode: 'needs_reauth',
       errorMessage: error.message,
       nextRetryAt: null,
     })
+    await markConnectionNeedsReauth(env.DB, job.connectionId, now)
+    await addAttempt(env, {
+      jobId: job.id,
+      platform: job.platform,
+      status: 'needs_reauth',
+      errorCode: error.code,
+      errorMessage: error.message,
+      providerStatus: error.providerStatus ?? null,
+      now,
+    })
     return { status: 'needs_reauth' }
   }
 
   if (!retryableCode(error.code)) {
-    await updateJobStatus(env.DB, {
-      id: job.id,
+    await updateOwnedJob(env, job.id, ownership, {
       status: 'failed',
       updatedAt: now,
       errorCode: error.code,
       errorMessage: error.message,
       nextRetryAt: null,
     })
+    await addAttempt(env, {
+      jobId: job.id,
+      platform: job.platform,
+      status: 'processing',
+      errorCode: error.code,
+      errorMessage: error.message,
+      providerStatus: error.providerStatus ?? null,
+      now,
+    })
     return { status: 'failed' }
   }
 
-  const delay = await scheduleRetry(env, job, 'processing_timeout', error.message, now)
+  const delay = await scheduleRetry(env, job, ownership, 'processing_timeout', error.message, now)
+  await addAttempt(env, {
+    jobId: job.id,
+    platform: job.platform,
+    status: 'processing',
+    errorCode: error.code,
+    errorMessage: error.message,
+    providerStatus: error.providerStatus ?? null,
+    now,
+  })
   if (delay === null) return { status: 'failed' }
   throw new PublisherRetryError(delay)
 }
@@ -384,11 +463,21 @@ async function handleProcessingProviderError(
 async function handleAmbiguousPostResult(
   env: Env,
   job: JobRecord,
+  ownership: ClaimOwnership,
   error: unknown,
   now: number,
 ): Promise<ProcessCrosspostResult> {
   const providerStatus = error instanceof PlatformAdapterError ? (error.providerStatus ?? null) : null
   const errorMessage = 'X post result is ambiguous after dispatch'
+  await updateOwnedJob(env, job.id, ownership, {
+    status: 'failed',
+    updatedAt: now,
+    errorCode: 'ambiguous_post_result',
+    errorMessage,
+    externalPostId: null,
+    externalPostUrl: null,
+    nextRetryAt: null,
+  })
   await addAttempt(env, {
     jobId: job.id,
     platform: job.platform,
@@ -398,20 +487,14 @@ async function handleAmbiguousPostResult(
     providerStatus,
     now,
   })
-  await updateJobStatus(env.DB, {
-    id: job.id,
-    status: 'failed',
-    updatedAt: now,
-    errorCode: 'ambiguous_post_result',
-    errorMessage,
-    externalPostId: null,
-    externalPostUrl: null,
-    nextRetryAt: null,
-  })
   return { status: 'failed' }
 }
 
-export async function processCrosspostJob(env: Env, jobId: string, options: { now?: number } = {}): Promise<ProcessCrosspostResult> {
+export async function processCrosspostJob(
+  env: Env,
+  jobId: string,
+  options: { now?: number; fenceNow?: number } = {},
+): Promise<ProcessCrosspostResult> {
   const now = options.now ?? nowSeconds()
   const existing = await getJob(env.DB, jobId)
   if (!existing) return { status: 'not_found' }
@@ -449,60 +532,76 @@ export async function processCrosspostJob(env: Env, jobId: string, options: { no
       ? await claimJobForStatusPoll(env.DB, existing.id, now)
       : await claimJobForPublish(env.DB, existing.id, now)
   if (!job) {
-    return { status: existing.status }
+    const current = await getJob(env.DB, existing.id)
+    return { status: current?.status ?? 'not_found' }
   }
 
+  let ownership: ClaimOwnership = { status: 'uploading', updatedAt: job.updatedAt }
   let dispatchFenceRaised = false
   const beforeExternalPost = async (): Promise<void> => {
-    const transitioned = await transitionClaimToDispatching(env.DB, job.id, job.updatedAt, now)
+    const fenceTimestamp = options.fenceNow ?? nowSeconds()
+    const transitioned = await transitionClaimToDispatching(env.DB, job.id, ownership.updatedAt, fenceTimestamp)
     if (!transitioned) throw new PublishClaimLostError()
+    ownership = { status: 'dispatching', updatedAt: fenceTimestamp }
     dispatchFenceRaised = true
   }
 
   try {
-    const accessToken = await accessTokenForJob(env, job, now)
-    if (!accessToken) return { status: 'needs_reauth' }
+    try {
+      const accessToken = await accessTokenForJob(env, job, ownership, now)
+      if (!accessToken) return { status: 'needs_reauth' }
 
-    const isProcessingPoll = existing.status === 'processing'
-    if (isProcessingPoll) {
-      if (!adapter.pollPublishStatus) {
-        const delay = await scheduleRetry(env, job, 'processing_timeout', 'platform publish is still processing', now)
-        return delay === null ? { status: 'failed' } : { status: 'processing', retryDelaySeconds: delay }
+      const isProcessingPoll = existing.status === 'processing'
+      if (isProcessingPoll) {
+        if (!adapter.pollPublishStatus) {
+          const delay = await scheduleRetry(
+            env,
+            job,
+            ownership,
+            'processing_timeout',
+            'platform publish is still processing',
+            now,
+          )
+          return delay === null ? { status: 'failed' } : { status: 'processing', retryDelaySeconds: delay }
+        }
+        const attempts = await listAttempts(env.DB, job.id)
+        const result = await adapter.pollPublishStatus({
+          accessToken,
+          providerResponse: pollProviderResponse(job, attempts),
+          beforeExternalPost,
+        })
+        return markResult(env, job, result, now, ownership, true)
       }
-      const attempts = await listAttempts(env.DB, job.id)
-      const result = await adapter.pollPublishStatus({
+
+      const result = await adapter.publishVideo({
         accessToken,
-        providerResponse: pollProviderResponse(job, attempts),
+        videoUrl: job.sourceMediaUrl,
+        mediaHash: job.sourceMediaHash,
+        caption: job.caption,
+        externalAccountId: job.externalAccountId,
         beforeExternalPost,
       })
-      return markResult(env, job, result, now, true)
+      return markResult(env, job, result, now, ownership)
+    } catch (error) {
+      if (error instanceof PublishClaimLostError) throw error
+      if (dispatchFenceRaised) {
+        return await handleAmbiguousPostResult(env, job, ownership, error, now)
+      }
+      if (error instanceof PlatformAdapterError) {
+        return existing.status === 'processing'
+          ? await handleProcessingProviderError(env, job, ownership, error, now)
+          : await handleProviderError(env, job, ownership, error, now)
+      }
+      const platformError = new PlatformAdapterError(job.platform, 'unknown_platform_error', 'publisher failed')
+      return existing.status === 'processing'
+        ? await handleProcessingProviderError(env, job, ownership, platformError, now)
+        : await handleProviderError(env, job, ownership, platformError, now)
     }
-
-    const result = await adapter.publishVideo({
-      accessToken,
-      videoUrl: job.sourceMediaUrl,
-      mediaHash: job.sourceMediaHash,
-      caption: job.caption,
-      externalAccountId: job.externalAccountId,
-      beforeExternalPost,
-    })
-    return markResult(env, job, result, now)
   } catch (error) {
     if (error instanceof PublishClaimLostError) {
       const current = await getJob(env.DB, job.id)
       return { status: current?.status ?? 'not_found' }
     }
-    if (dispatchFenceRaised) {
-      return handleAmbiguousPostResult(env, job, error, now)
-    }
-    if (error instanceof PlatformAdapterError) {
-      return existing.status === 'processing'
-        ? handleProcessingProviderError(env, job, error, now)
-        : handleProviderError(env, job, error, now)
-    }
-    const platformError = new PlatformAdapterError(job.platform, 'unknown_platform_error', 'publisher failed')
-    return existing.status === 'processing'
-      ? handleProcessingProviderError(env, job, platformError, now)
-      : handleProviderError(env, job, platformError, now)
+    throw error
   }
 }

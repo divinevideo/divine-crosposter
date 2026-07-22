@@ -7,6 +7,7 @@ import {
   listJobsForVideo,
   listRunnableJobs,
   transitionClaimToDispatching,
+  updateClaimedJobStatus,
   updateJobStatus,
 } from './jobs'
 import { applyMigrations, connection, job, PUBKEY_A, VIDEO_EVENT_ID } from './test-helpers'
@@ -170,5 +171,33 @@ describe('job repository', () => {
       updatedAt: 2_001,
     })
     await expect(transitionClaimToDispatching(db, 'job_dispatch', 2_000, 2_002)).resolves.toBe(false)
+  })
+
+  it('conditionally updates a claimed job only for the expected status and ownership token', async () => {
+    await createOrGetJob(db, job({ id: 'job_owned_update' }))
+    await claimJobForPublish(db, 'job_owned_update', 2_000)
+
+    await expect(
+      updateClaimedJobStatus(
+        db,
+        { id: 'job_owned_update', status: 'processing', updatedAt: 2_100, nextRetryAt: 2_160 },
+        { status: 'processing', updatedAt: 2_000 },
+      ),
+    ).resolves.toBeNull()
+    await expect(
+      updateClaimedJobStatus(
+        db,
+        { id: 'job_owned_update', status: 'processing', updatedAt: 2_100, nextRetryAt: 2_160 },
+        { status: 'uploading', updatedAt: 1_999 },
+      ),
+    ).resolves.toBeNull()
+
+    await expect(
+      updateClaimedJobStatus(
+        db,
+        { id: 'job_owned_update', status: 'processing', updatedAt: 2_100, nextRetryAt: 2_160 },
+        { status: 'uploading', updatedAt: 2_000 },
+      ),
+    ).resolves.toMatchObject({ status: 'processing', updatedAt: 2_100, nextRetryAt: 2_160 })
   })
 })

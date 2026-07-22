@@ -91,7 +91,10 @@ function rejectDispatchingWrites(db: D1Database): D1Database {
             if (statementProperty !== 'bind') return Reflect.get(statementTarget, statementProperty, statementReceiver)
             return (...bindings: unknown[]) => {
               const bound = statementTarget.bind(...bindings)
-              if (query.includes("SET status = 'dispatching'")) {
+              if (
+                query.includes("SET status = 'dispatching'") ||
+                (query.includes('RETURNING *') && bindings[0] === 'dispatching')
+              ) {
                 return new Proxy(bound, {
                   get(boundTarget, boundProperty, boundReceiver) {
                     if (boundProperty === 'first') {
@@ -104,6 +107,37 @@ function rejectDispatchingWrites(db: D1Database): D1Database {
                 })
               }
               return bound
+            }
+          },
+        })
+      }
+    },
+  }) as D1Database
+}
+
+function replaceClaimWithDispatchingOwner(db: D1Database): D1Database {
+  return new Proxy(db, {
+    get(target, property, receiver) {
+      if (property !== 'prepare') return Reflect.get(target, property, receiver)
+      return (query: string) => {
+        const statement = target.prepare(query)
+        return new Proxy(statement, {
+          get(statementTarget, statementProperty, statementReceiver) {
+            if (statementProperty !== 'bind') return Reflect.get(statementTarget, statementProperty, statementReceiver)
+            return (...bindings: unknown[]) => {
+              const bound = statementTarget.bind(...bindings)
+              if (!query.includes("status IN ('queued', 'failed')")) return bound
+              return new Proxy(bound, {
+                get(boundTarget, boundProperty, boundReceiver) {
+                  if (boundProperty === 'first') {
+                    return async () => {
+                      await updateJobStatus(db, { id: 'job_1', status: 'dispatching', updatedAt: 3_000 })
+                      return null
+                    }
+                  }
+                  return Reflect.get(boundTarget, boundProperty, boundReceiver)
+                },
+              })
             }
           },
         })
@@ -217,13 +251,16 @@ describe('publisher service', () => {
       .mockResolvedValueOnce(new Response(null, { status: 204 }))
       .mockResolvedValueOnce(Response.json({ data: { id: 'media-id', finalize_secret: 'finalize-sentinel' } }))
       .mockImplementationOnce(async () => {
-        await expect(getJob(db, 'job_1', PUBKEY_A)).resolves.toMatchObject({ status: 'dispatching' })
+        await expect(getJob(db, 'job_1', PUBKEY_A)).resolves.toMatchObject({
+          status: 'dispatching',
+          updatedAt: 2_500,
+        })
         return Response.json({ data: { id: 'full-tweet-id', token: 'tweet-token-sentinel' } })
       })
 
-    await expect(processCrosspostJob(platformEnv(db, 'x'), 'job_1', { now: 2_000 })).resolves.toEqual({
-      status: 'posted',
-    })
+    await expect(
+      processCrosspostJob(platformEnv(db, 'x'), 'job_1', { now: 2_000, fenceNow: 2_500 }),
+    ).resolves.toEqual({ status: 'posted' })
 
     expect(fetchMock.mock.calls.filter((call) => String(call[0]) === 'https://api.x.com/2/tweets')).toHaveLength(1)
     await expect(getJob(db, 'job_1', PUBKEY_A)).resolves.toMatchObject({
@@ -396,6 +433,72 @@ describe('publisher service', () => {
     ])
   })
 
+  it('prevents a stale pre-fence failure from mutating a newer dispatching owner', async () => {
+    await seedConnectedJob(db, 'x')
+    const staleSourceStarted = deferred<void>()
+    const staleSource = deferred<Response>()
+    const currentTweetStarted = deferred<void>()
+    const currentTweet = deferred<Response>()
+    let sourceRequests = 0
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === 'https://cdn.divine.video/video.mp4') {
+        sourceRequests += 1
+        if (sourceRequests === 1) {
+          staleSourceStarted.resolve()
+          return staleSource.promise
+        }
+        return new Response(new Uint8Array([4, 5, 6]))
+      }
+      if (url === 'https://api.x.com/2/media/upload') {
+        const command = (init?.body as FormData).get('command')
+        if (command === 'INIT') return Response.json({ data: { id: 'current-media-id' } })
+        if (command === 'APPEND') return new Response(null, { status: 204 })
+        return Response.json({ data: { id: 'current-media-id' } })
+      }
+      if (url === 'https://api.x.com/2/tweets') {
+        currentTweetStarted.resolve()
+        return currentTweet.promise
+      }
+      throw new Error(`unexpected fetch ${url}`)
+    })
+
+    const staleWorker = processCrosspostJob(platformEnv(db, 'x'), 'job_1', { now: 2_000, fenceNow: 2_100 })
+    await staleSourceStarted.promise
+    await updateJobStatus(db, { id: 'job_1', status: 'queued', updatedAt: 3_000, nextRetryAt: null })
+
+    const currentWorker = processCrosspostJob(platformEnv(db, 'x'), 'job_1', { now: 3_001, fenceNow: 4_000 })
+    await currentTweetStarted.promise
+    await expect(getJob(db, 'job_1', PUBKEY_A)).resolves.toMatchObject({
+      status: 'dispatching',
+      updatedAt: 4_000,
+      retryCount: 0,
+      nextRetryAt: null,
+    })
+
+    staleSource.resolve(Response.json({ error: 'stale source failure sentinel' }, { status: 503 }))
+    await expect(staleWorker).resolves.toEqual({ status: 'dispatching' })
+    await expect(getJob(db, 'job_1', PUBKEY_A)).resolves.toMatchObject({
+      status: 'dispatching',
+      updatedAt: 4_000,
+      errorCode: null,
+      retryCount: 0,
+      nextRetryAt: null,
+    })
+    await expect(listAttempts(db, 'job_1')).resolves.toEqual([])
+    expect(fetchMock.mock.calls.filter((call) => String(call[0]) === 'https://api.x.com/2/tweets')).toHaveLength(1)
+
+    currentTweet.resolve(Response.json({ data: { id: 'current-tweet-id' } }))
+    await expect(currentWorker).resolves.toEqual({ status: 'posted' })
+    await expect(getJob(db, 'job_1', PUBKEY_A)).resolves.toMatchObject({
+      status: 'posted',
+      externalPostId: 'current-tweet-id',
+      externalPostUrl: 'https://x.com/i/web/status/current-tweet-id',
+    })
+    await expect(listAttempts(db, 'job_1')).resolves.toEqual([
+      expect.objectContaining({ status: 'posted', errorCode: null, providerResponseJson: null }),
+    ])
+  })
+
   it('leaves a stale dispatching X job unclaimed for recovery work', async () => {
     await seedConnectedJob(db, 'x', { status: 'dispatching' })
 
@@ -521,6 +624,21 @@ describe('publisher service', () => {
     expect(results).toContainEqual({ status: 'posted' })
     expect(fetchMock).toHaveBeenCalledTimes(3)
     await expect(listAttempts(db, 'job_1')).resolves.toHaveLength(1)
+  })
+
+  it('returns the current owner status without mutation when its claim loses a race', async () => {
+    await seedConnectedJob(db, 'instagram')
+
+    const racingEnv = { ...platformEnv(db, 'instagram'), DB: replaceClaimWithDispatchingOwner(db) }
+    await expect(processCrosspostJob(racingEnv, 'job_1', { now: 2_000 })).resolves.toEqual({ status: 'dispatching' })
+
+    await expect(getJob(db, 'job_1', PUBKEY_A)).resolves.toMatchObject({
+      status: 'dispatching',
+      updatedAt: 3_000,
+      retryCount: 0,
+    })
+    await expect(listAttempts(db, 'job_1')).resolves.toEqual([])
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('polls a processing job and marks it posted when the platform is complete', async () => {
