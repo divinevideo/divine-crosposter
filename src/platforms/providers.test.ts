@@ -162,18 +162,22 @@ describe('provider adapters', () => {
       .mockResolvedValueOnce(Response.json({ id: 'container-id' }))
       .mockResolvedValueOnce(Response.json({ status_code: 'FINISHED' }))
       .mockResolvedValueOnce(Response.json({ id: 'ig-post-id' }))
+      .mockResolvedValueOnce(Response.json({ permalink: 'https://instagram.com/reel/id' }))
 
     await expect(adapter.publishVideo(publishInput())).resolves.toMatchObject({
       status: 'posted',
       externalPostId: 'ig-post-id',
+      externalPostUrl: 'https://instagram.com/reel/id',
     })
 
-    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(fetchMock).toHaveBeenCalledTimes(4)
     expect(fetchMock).toHaveBeenNthCalledWith(
       3,
       'https://graph.instagram.com/v23.0/account-id/media_publish',
       expect.objectContaining({ method: 'POST' }),
     )
+    expect(String(fetchMock.mock.calls[3][0])).toContain('https://graph.instagram.com/v23.0/ig-post-id')
+    expect(String(fetchMock.mock.calls[3][0])).toContain('fields=permalink')
   })
 
   it('discovers the Instagram professional account without needing a Facebook Page', async () => {
@@ -191,6 +195,7 @@ describe('provider adapters', () => {
       .mockResolvedValueOnce(Response.json({ id: 'container-id' }))
       .mockResolvedValueOnce(Response.json({ status_code: 'FINISHED' }))
       .mockResolvedValueOnce(Response.json({ id: 'ig-post-id' }))
+      .mockResolvedValueOnce(Response.json({ permalink: 'https://instagram.com/reel/id' }))
 
     const account = await adapter.fetchAccount({ accessToken: 'access' })
     expect(account).toMatchObject({
@@ -230,7 +235,8 @@ describe('provider adapters', () => {
     const adapter = createInstagramAdapter({ clientId: 'client', clientSecret: 'secret' })
     fetchMock
       .mockResolvedValueOnce(Response.json({ status_code: 'FINISHED' }))
-      .mockResolvedValueOnce(Response.json({ id: 'ig-post-id', permalink: 'https://instagram.com/reel/id' }))
+      .mockResolvedValueOnce(Response.json({ id: 'ig-post-id' }))
+      .mockResolvedValueOnce(Response.json({ permalink: 'https://instagram.com/reel/id' }))
 
     await expect(
       adapter.pollPublishStatus?.({
@@ -252,6 +258,28 @@ describe('provider adapters', () => {
       'https://graph.instagram.com/v23.0/account-id/media_publish',
       expect.objectContaining({ method: 'POST' }),
     )
+    expect(String(fetchMock.mock.calls[2][0])).toContain('https://graph.instagram.com/v23.0/ig-post-id')
+    expect(String(fetchMock.mock.calls[2][0])).toContain('fields=permalink')
+  })
+
+  it('keeps an Instagram post successful when permalink lookup fails after publication', async () => {
+    const adapter = createInstagramAdapter({ clientId: 'client', clientSecret: 'secret' })
+    fetchMock
+      .mockResolvedValueOnce(Response.json({ status_code: 'FINISHED' }))
+      .mockResolvedValueOnce(Response.json({ id: 'ig-post-id' }))
+      .mockResolvedValueOnce(Response.json({ error: { message: 'temporary lookup failure' } }, { status: 503 }))
+
+    const result = await adapter.pollPublishStatus?.({
+      accessToken: 'access',
+      providerResponse: {
+        creationId: 'container-id',
+        externalAccountId: 'account-id',
+      },
+    })
+
+    expect(result).toMatchObject({ status: 'posted', externalPostId: 'ig-post-id' })
+    expect(result?.externalPostUrl).toBeUndefined()
+    expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 
   it('starts TikTok direct post with pull-from-url source info', async () => {

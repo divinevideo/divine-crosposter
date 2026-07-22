@@ -64,6 +64,20 @@ async function fetchContainerStatus(creationId: string, accessToken: string): Pr
   return status
 }
 
+async function fetchPublishedPermalink(externalPostId: string, accessToken: string): Promise<string | undefined> {
+  const url = new URL(`${GRAPH_BASE}/${externalPostId}`)
+  url.searchParams.set('fields', 'permalink')
+  url.searchParams.set('access_token', accessToken)
+  try {
+    const media = await getJson(url)
+    return typeof media.permalink === 'string' && media.permalink.trim() ? media.permalink : undefined
+  } catch {
+    // The Reel is already public after media_publish succeeds. A metadata
+    // lookup failure must not turn that success into a retry and duplicate it.
+    return undefined
+  }
+}
+
 export function createInstagramAdapter(config: InstagramConfig): PlatformAdapter {
   return {
     platform: 'instagram',
@@ -145,10 +159,11 @@ export function createInstagramAdapter(config: InstagramConfig): PlatformAdapter
         new URLSearchParams({ creation_id: creationId, access_token: input.accessToken }),
       )
       const externalPostId = String(published.id ?? creationId)
+      const externalPostUrl = await fetchPublishedPermalink(externalPostId, input.accessToken)
       return {
         status: 'posted',
         externalPostId,
-        externalPostUrl: typeof published.permalink === 'string' ? published.permalink : undefined,
+        externalPostUrl,
         providerResponse: {
           id: creationId,
           creationId,
@@ -176,10 +191,11 @@ export function createInstagramAdapter(config: InstagramConfig): PlatformAdapter
         new URLSearchParams({ creation_id: creationId, access_token: accessToken }),
       )
       const externalPostId = String(published.id ?? creationId)
+      const externalPostUrl = await fetchPublishedPermalink(externalPostId, accessToken)
       return {
         status: 'posted',
         externalPostId,
-        externalPostUrl: typeof published.permalink === 'string' ? published.permalink : undefined,
+        externalPostUrl,
         providerResponse: { ...providerResponse, id: creationId, creationId, status, published },
       }
     },
