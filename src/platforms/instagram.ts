@@ -6,13 +6,22 @@ type InstagramConfig = {
   clientSecret: string
 }
 
-const GRAPH_BASE = 'https://graph.facebook.com/v20.0'
+// "Instagram API with Instagram Login": creators sign in with their Instagram
+// professional account directly — no Facebook Page link required.
+const AUTHORIZE_URL = 'https://www.instagram.com/oauth/authorize'
+const SHORT_LIVED_TOKEN_URL = 'https://api.instagram.com/oauth/access_token'
+const GRAPH_BASE = 'https://graph.instagram.com/v23.0'
+const GRAPH_ROOT = 'https://graph.instagram.com'
+const SCOPES = 'instagram_business_basic,instagram_business_content_publish'
 
-function tokenSetFromResponse(response: Record<string, unknown>): TokenSet {
+// Long-lived tokens refresh with the token itself (ig_refresh_token grant), so
+// the access token doubles as the stored refresh token.
+function longLivedTokenSet(response: Record<string, unknown>): TokenSet {
   const expiresIn = typeof response.expires_in === 'number' ? response.expires_in : undefined
+  const accessToken = String(response.access_token ?? '')
   return {
-    accessToken: String(response.access_token ?? ''),
-    refreshToken: typeof response.refresh_token === 'string' ? response.refresh_token : undefined,
+    accessToken,
+    refreshToken: accessToken || undefined,
     expiresAt: expiresIn ? Math.floor(Date.now() / 1000) + expiresIn : undefined,
     scopes: typeof response.scope === 'string' ? response.scope.split(',').map((scope) => scope.trim()) : [],
     metadata: response,
@@ -33,50 +42,60 @@ async function postForm(url: string, body: URLSearchParams): Promise<Record<stri
   return asRecord(await expectProviderOk('instagram', response))
 }
 
+async function getJson(url: URL): Promise<Record<string, unknown>> {
+  return asRecord(await expectProviderOk('instagram', await fetch(url.toString())))
+}
+
 export function createInstagramAdapter(config: InstagramConfig): PlatformAdapter {
   return {
     platform: 'instagram',
     buildAuthorizationUrl({ state, redirectUri }) {
-      const url = new URL('https://www.facebook.com/v20.0/dialog/oauth')
+      const url = new URL(AUTHORIZE_URL)
       url.searchParams.set('client_id', config.clientId)
       url.searchParams.set('redirect_uri', redirectUri)
       url.searchParams.set('state', state)
       url.searchParams.set('response_type', 'code')
-      url.searchParams.set('scope', 'instagram_basic,instagram_content_publish,pages_show_list,pages_read_engagement')
+      url.searchParams.set('scope', SCOPES)
       return url.toString()
     },
     async exchangeCallback({ code, redirectUri }) {
-      const body = new URLSearchParams({
-        client_id: config.clientId,
-        client_secret: config.clientSecret,
-        redirect_uri: redirectUri,
-        code,
-        grant_type: 'authorization_code',
-      })
-      return tokenSetFromResponse(await postForm(`${GRAPH_BASE}/oauth/access_token`, body))
+      const shortLived = await postForm(
+        SHORT_LIVED_TOKEN_URL,
+        new URLSearchParams({
+          client_id: config.clientId,
+          client_secret: config.clientSecret,
+          redirect_uri: redirectUri,
+          code,
+          grant_type: 'authorization_code',
+        }),
+      )
+
+      const exchangeUrl = new URL(`${GRAPH_ROOT}/access_token`)
+      exchangeUrl.searchParams.set('grant_type', 'ig_exchange_token')
+      exchangeUrl.searchParams.set('client_secret', config.clientSecret)
+      exchangeUrl.searchParams.set('access_token', String(shortLived.access_token ?? ''))
+      const longLived = await getJson(exchangeUrl)
+
+      const tokens = longLivedTokenSet(longLived)
+      return { ...tokens, metadata: { ...longLived, user_id: shortLived.user_id, permissions: shortLived.permissions } }
     },
     async refreshToken({ refreshToken }) {
-      const url = new URL(`${GRAPH_BASE}/refresh_access_token`)
+      const url = new URL(`${GRAPH_ROOT}/refresh_access_token`)
       url.searchParams.set('grant_type', 'ig_refresh_token')
       url.searchParams.set('access_token', refreshToken)
-      const response = await fetch(url.toString())
-      return tokenSetFromResponse(asRecord(await expectProviderOk('instagram', response)))
+      return longLivedTokenSet(await getJson(url))
     },
     async fetchAccount({ accessToken }) {
-      const url = new URL(`${GRAPH_BASE}/me/accounts`)
-      url.searchParams.set('fields', 'id,name,instagram_business_account{id,username}')
+      const url = new URL(`${GRAPH_BASE}/me`)
+      url.searchParams.set('fields', 'user_id,username,name,account_type')
       url.searchParams.set('access_token', accessToken)
-      const body = asRecord(await expectProviderOk('instagram', await fetch(url.toString())))
-      const accounts = Array.isArray(body.data) ? body.data : []
-      const account = asRecord(accounts[0])
-      const instagramBusinessAccount = asRecord(account.instagram_business_account)
-      const instagramAccountId = String(instagramBusinessAccount.id ?? '')
-      const pageId = String(account.id ?? '')
+      const body = await getJson(url)
+      const instagramAccountId = String(body.user_id ?? body.id ?? '')
       return {
         id: instagramAccountId,
-        name: String(instagramBusinessAccount.username ?? account.name ?? 'Instagram account'),
-        metadata: { ...body, pageId, page: account, instagramBusinessAccount },
-      }
+        name: String(body.username ?? body.name ?? 'Instagram account'),
+        metadata: body,
+      } satisfies PlatformAccount
     },
     async publishVideo(input: PublishInput): Promise<PublishResult> {
       const createBody = new URLSearchParams({
@@ -85,17 +104,12 @@ export function createInstagramAdapter(config: InstagramConfig): PlatformAdapter
         caption: input.caption,
         access_token: input.accessToken,
       })
-      const container = asRecord(
-        await expectProviderOk(
-          'instagram',
-          await fetch(`${GRAPH_BASE}/${input.externalAccountId}/media`, { method: 'POST', body: createBody }),
-        ),
-      )
+      const container = await postForm(`${GRAPH_BASE}/${input.externalAccountId}/media`, createBody)
       const creationId = String(container.id ?? '')
       const statusUrl = new URL(`${GRAPH_BASE}/${creationId}`)
       statusUrl.searchParams.set('fields', 'status_code')
       statusUrl.searchParams.set('access_token', input.accessToken)
-      const status = asRecord(await expectProviderOk('instagram', await fetch(statusUrl.toString())))
+      const status = await getJson(statusUrl)
 
       if (status.status_code !== 'FINISHED') {
         return {
@@ -111,12 +125,9 @@ export function createInstagramAdapter(config: InstagramConfig): PlatformAdapter
         }
       }
 
-      const publishBody = new URLSearchParams({ creation_id: creationId, access_token: input.accessToken })
-      const published = asRecord(
-        await expectProviderOk(
-          'instagram',
-          await fetch(`${GRAPH_BASE}/${input.externalAccountId}/media_publish`, { method: 'POST', body: publishBody }),
-        ),
+      const published = await postForm(
+        `${GRAPH_BASE}/${input.externalAccountId}/media_publish`,
+        new URLSearchParams({ creation_id: creationId, access_token: input.accessToken }),
       )
       const externalPostId = String(published.id ?? creationId)
       return {
@@ -138,7 +149,7 @@ export function createInstagramAdapter(config: InstagramConfig): PlatformAdapter
       const url = new URL(`${GRAPH_BASE}/${creationId}`)
       url.searchParams.set('fields', 'status_code')
       url.searchParams.set('access_token', accessToken)
-      const status = asRecord(await expectProviderOk('instagram', await fetch(url.toString())))
+      const status = await getJson(url)
       if (status.status_code !== 'FINISHED') {
         return {
           status: 'processing',
@@ -148,12 +159,9 @@ export function createInstagramAdapter(config: InstagramConfig): PlatformAdapter
       }
 
       const externalAccountId = instagramExternalAccountId(providerResponse)
-      const publishBody = new URLSearchParams({ creation_id: creationId, access_token: accessToken })
-      const published = asRecord(
-        await expectProviderOk(
-          'instagram',
-          await fetch(`${GRAPH_BASE}/${externalAccountId}/media_publish`, { method: 'POST', body: publishBody }),
-        ),
+      const published = await postForm(
+        `${GRAPH_BASE}/${externalAccountId}/media_publish`,
+        new URLSearchParams({ creation_id: creationId, access_token: accessToken }),
       )
       const externalPostId = String(published.id ?? creationId)
       return {

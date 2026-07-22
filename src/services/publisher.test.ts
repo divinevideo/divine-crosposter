@@ -572,7 +572,7 @@ describe('publisher service', () => {
     expect(String(fetchMock.mock.calls[0][0])).toContain('/container-id')
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      'https://graph.facebook.com/v20.0/external-account-1/media_publish',
+      'https://graph.instagram.com/v23.0/external-account-1/media_publish',
       expect.objectContaining({ method: 'POST' }),
     )
   })
@@ -603,7 +603,7 @@ describe('publisher service', () => {
     })
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      'https://graph.facebook.com/v20.0/external-account-1/media_publish',
+      'https://graph.instagram.com/v23.0/external-account-1/media_publish',
       expect.objectContaining({ method: 'POST' }),
     )
     expect(JSON.stringify(fetchMock.mock.calls)).not.toContain('legacy-instagram-token-sentinel')

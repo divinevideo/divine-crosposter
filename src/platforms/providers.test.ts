@@ -57,7 +57,7 @@ describe('provider adapters', () => {
     vi.unstubAllGlobals()
   })
 
-  it('builds OAuth URLs with state and redirect URI', () => {
+  it('builds Instagram-login OAuth URLs with business scopes', () => {
     const adapter = createInstagramAdapter({ clientId: 'client', clientSecret: 'secret' })
     const authorizationUrl = new URL(
       adapter.buildAuthorizationUrl({
@@ -66,12 +66,50 @@ describe('provider adapters', () => {
       }),
     )
 
-    expect(authorizationUrl.origin).toBe('https://www.facebook.com')
+    expect(authorizationUrl.origin).toBe('https://www.instagram.com')
+    expect(authorizationUrl.pathname).toBe('/oauth/authorize')
     expect(authorizationUrl.searchParams.get('client_id')).toBe('client')
     expect(authorizationUrl.searchParams.get('state')).toBe('state-id')
+    expect(authorizationUrl.searchParams.get('scope')).toBe('instagram_business_basic,instagram_business_content_publish')
     expect(authorizationUrl.searchParams.get('redirect_uri')).toBe(
       'https://crossposter.divine.video/connections/instagram/callback',
     )
+  })
+
+  it('exchanges an Instagram code for a long-lived token', async () => {
+    const adapter = createInstagramAdapter({ clientId: 'client', clientSecret: 'secret' })
+    fetchMock
+      .mockResolvedValueOnce(Response.json({ access_token: 'short-token', user_id: 'ig-user-id' }))
+      .mockResolvedValueOnce(Response.json({ access_token: 'long-token', token_type: 'bearer', expires_in: 5184000 }))
+
+    const tokens = await adapter.exchangeCallback({
+      code: 'auth-code',
+      redirectUri: 'https://crossposter.divine.video/connections/instagram/callback',
+    })
+
+    expect(tokens.accessToken).toBe('long-token')
+    expect(tokens.refreshToken).toBe('long-token')
+    expect(tokens.expiresAt).toBeGreaterThan(Math.floor(Date.now() / 1000))
+    expect(String(fetchMock.mock.calls[0][0])).toBe('https://api.instagram.com/oauth/access_token')
+    expect(bodyAsParams(fetchMock.mock.calls[0]).get('grant_type')).toBe('authorization_code')
+    expect(String(fetchMock.mock.calls[1][0])).toContain('https://graph.instagram.com/access_token')
+    expect(String(fetchMock.mock.calls[1][0])).toContain('grant_type=ig_exchange_token')
+    expect(String(fetchMock.mock.calls[1][0])).toContain('access_token=short-token')
+  })
+
+  it('refreshes a long-lived Instagram token with the ig_refresh_token grant', async () => {
+    const adapter = createInstagramAdapter({ clientId: 'client', clientSecret: 'secret' })
+    fetchMock.mockResolvedValueOnce(
+      Response.json({ access_token: 'refreshed-token', token_type: 'bearer', expires_in: 5184000 }),
+    )
+
+    const tokens = await adapter.refreshToken({ refreshToken: 'long-token' })
+
+    expect(tokens.accessToken).toBe('refreshed-token')
+    expect(tokens.refreshToken).toBe('refreshed-token')
+    expect(String(fetchMock.mock.calls[0][0])).toContain('https://graph.instagram.com/refresh_access_token')
+    expect(String(fetchMock.mock.calls[0][0])).toContain('grant_type=ig_refresh_token')
+    expect(String(fetchMock.mock.calls[0][0])).toContain('access_token=long-token')
   })
 
   it('throws normalized provider errors from provider request failures', async () => {
@@ -87,7 +125,7 @@ describe('provider adapters', () => {
     })
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://graph.facebook.com/v20.0/account-id/media',
+      'https://graph.instagram.com/v23.0/account-id/media',
       expect.objectContaining({ method: 'POST' }),
     )
   })
@@ -111,10 +149,10 @@ describe('provider adapters', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      'https://graph.facebook.com/v20.0/account-id/media',
+      'https://graph.instagram.com/v23.0/account-id/media',
       expect.objectContaining({ method: 'POST' }),
     )
-    expect(String(fetchMock.mock.calls[1][0])).toContain('https://graph.facebook.com/v20.0/container-id')
+    expect(String(fetchMock.mock.calls[1][0])).toContain('https://graph.instagram.com/v23.0/container-id')
     expect(String(fetchMock.mock.calls[1][0])).toContain('fields=status_code')
   })
 
@@ -133,26 +171,21 @@ describe('provider adapters', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3)
     expect(fetchMock).toHaveBeenNthCalledWith(
       3,
-      'https://graph.facebook.com/v20.0/account-id/media_publish',
+      'https://graph.instagram.com/v23.0/account-id/media_publish',
       expect.objectContaining({ method: 'POST' }),
     )
   })
 
-  it('discovers Instagram business account id and publishes with that id', async () => {
+  it('discovers the Instagram professional account without needing a Facebook Page', async () => {
     const adapter = createInstagramAdapter({ clientId: 'client', clientSecret: 'secret' })
     fetchMock
       .mockResolvedValueOnce(
         Response.json({
-          data: [
-            {
-              id: 'facebook-page-id',
-              name: 'Divine Page',
-              instagram_business_account: {
-                id: 'ig-business-id',
-                username: 'divinevideo',
-              },
-            },
-          ],
+          id: 'app-scoped-id',
+          user_id: 'ig-user-id',
+          username: 'divinevideo',
+          name: 'Divine',
+          account_type: 'BUSINESS',
         }),
       )
       .mockResolvedValueOnce(Response.json({ id: 'container-id' }))
@@ -161,18 +194,17 @@ describe('provider adapters', () => {
 
     const account = await adapter.fetchAccount({ accessToken: 'access' })
     expect(account).toMatchObject({
-      id: 'ig-business-id',
+      id: 'ig-user-id',
       name: 'divinevideo',
-      metadata: { pageId: 'facebook-page-id' },
     })
-    expect(String(fetchMock.mock.calls[0][0])).toContain('/me/accounts')
-    expect(String(fetchMock.mock.calls[0][0])).toContain('instagram_business_account')
+    expect(String(fetchMock.mock.calls[0][0])).toContain('https://graph.instagram.com/v23.0/me')
+    expect(String(fetchMock.mock.calls[0][0])).toContain('user_id')
 
     await adapter.publishVideo({ ...publishInput(), externalAccountId: account.id })
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      'https://graph.facebook.com/v20.0/ig-business-id/media',
+      'https://graph.instagram.com/v23.0/ig-user-id/media',
       expect.objectContaining({ method: 'POST' }),
     )
   })
@@ -197,10 +229,10 @@ describe('provider adapters', () => {
       externalPostUrl: 'https://instagram.com/reel/id',
     })
 
-    expect(String(fetchMock.mock.calls[0][0])).toContain('https://graph.facebook.com/v20.0/container-id')
+    expect(String(fetchMock.mock.calls[0][0])).toContain('https://graph.instagram.com/v23.0/container-id')
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      'https://graph.facebook.com/v20.0/account-id/media_publish',
+      'https://graph.instagram.com/v23.0/account-id/media_publish',
       expect.objectContaining({ method: 'POST' }),
     )
   })

@@ -4,6 +4,7 @@ import { crossposts } from './routes/crossposts'
 import { health } from './routes/health'
 import { platforms } from './routes/platforms'
 import { preferences } from './routes/preferences'
+import { webhooks } from './routes/webhooks'
 import { processCrosspostJob, PublisherRetryError } from './services/publisher'
 import { runAutoCrosspostReconciliation } from './services/reconciler'
 import { runOperationalChecks } from './services/operations'
@@ -15,6 +16,7 @@ app.route('/', platforms)
 app.route('/', connections)
 app.route('/', preferences)
 app.route('/', crossposts)
+app.route('/', webhooks)
 
 export { app }
 
