@@ -160,16 +160,35 @@ describe('job repository', () => {
         }),
       )
     }
+    for (const [id, retryCount, expiresAt] of [
+      ['retry_boundary', 4, now + 10_000],
+      ['retry_exhausted', 5, now + 10_000],
+      ['expired_upload', 1, now],
+    ] as const) {
+      await createOrGetJob(
+        db,
+        job({
+          id,
+          videoEventId: id.padEnd(64, '0'),
+          externalAccountId: id,
+          platform: 'x',
+          status: 'uploading',
+          updatedAt: now - leaseSeconds,
+          retryCount,
+          expiresAt,
+        }),
+      )
+    }
 
     await expect(recoverStaleXClaims(db, now, leaseSeconds)).resolves.toEqual({
-      uploadingRecovered: 1,
+      uploadingRecovered: 4,
       dispatchingFailed: 1,
     })
     await expect(getJob(db, 'stale_upload')).resolves.toMatchObject({
       status: 'failed',
       errorCode: 'unknown_platform_error',
       errorMessage: 'stale X upload claim recovered before dispatch',
-      retryCount: 2,
+      retryCount: 3,
       nextRetryAt: now,
       updatedAt: now,
     })
@@ -181,10 +200,31 @@ describe('job repository', () => {
       nextRetryAt: null,
       updatedAt: now,
     })
-    await expect(listRunnableJobs(db, now, 20)).resolves.toEqual([
-      expect.objectContaining({ id: 'other_status' }),
-      expect.objectContaining({ id: 'stale_upload' }),
-    ])
+    await expect(getJob(db, 'retry_boundary')).resolves.toMatchObject({
+      status: 'failed',
+      errorCode: 'unknown_platform_error',
+      retryCount: 5,
+      nextRetryAt: now,
+    })
+    await expect(getJob(db, 'retry_exhausted')).resolves.toMatchObject({
+      status: 'failed',
+      errorCode: 'unknown_platform_error',
+      retryCount: 6,
+      nextRetryAt: null,
+    })
+    await expect(getJob(db, 'expired_upload')).resolves.toMatchObject({
+      status: 'skipped',
+      errorCode: 'expired',
+      retryCount: 1,
+      nextRetryAt: null,
+    })
+    const runnableIds = (await listRunnableJobs(db, now, 20)).map((candidate) => candidate.id)
+    expect(runnableIds).toEqual(expect.arrayContaining(['other_status', 'stale_upload', 'retry_boundary']))
+    expect(runnableIds).not.toEqual(expect.arrayContaining(['retry_exhausted', 'expired_upload', 'stale_dispatch']))
+    await expect(recoverStaleXClaims(db, now, leaseSeconds)).resolves.toEqual({
+      uploadingRecovered: 0,
+      dispatchingFailed: 0,
+    })
     await expect(getJob(db, 'fresh_upload')).resolves.toMatchObject({ status: 'uploading', retryCount: 4 })
     await expect(getJob(db, 'fresh_dispatch')).resolves.toMatchObject({ status: 'dispatching', retryCount: 4 })
     await expect(getJob(db, 'other_upload')).resolves.toMatchObject({ status: 'uploading', retryCount: 5 })

@@ -19,11 +19,14 @@ export async function countOverdueRunnableJobs(
     db,
     `SELECT COUNT(*) AS count
     FROM jobs
-    WHERE status IN ('queued', 'failed', 'processing')
-      AND expires_at > ?
-      AND COALESCE(next_retry_at, created_at) <= ?`,
-    now,
+    WHERE (
+        (status IN ('queued', 'processing') AND COALESCE(next_retry_at, created_at) <= ?)
+        OR (status = 'failed' AND next_retry_at IS NOT NULL AND next_retry_at <= ?)
+      )
+      AND expires_at > ?`,
     now - graceSeconds,
+    now - graceSeconds,
+    now,
   )
   return row?.count ?? 0
 }

@@ -1,6 +1,8 @@
 import { allPrepared, changes, firstPrepared, runPrepared } from './client'
 import type { CreateJobInput, ErrorCode, JobRecord, JobStatus, Platform, UpdateJobStatusInput } from '../types'
 
+export const MAX_RETRY_COUNT = 5
+
 type JobRow = {
   id: string
   pubkey: string
@@ -270,12 +272,25 @@ export async function recoverStaleXClaims(
   const uploading = await runPrepared(
     db,
     `UPDATE jobs
-    SET status = 'failed',
-        error_code = 'unknown_platform_error',
-        error_message = 'stale X upload claim recovered before dispatch',
-        next_retry_at = ?,
+    SET status = CASE WHEN expires_at <= ? THEN 'skipped' ELSE 'failed' END,
+        error_code = CASE WHEN expires_at <= ? THEN 'expired' ELSE 'unknown_platform_error' END,
+        error_message = CASE
+          WHEN expires_at <= ? THEN 'crosspost job expired during stale claim recovery'
+          ELSE 'stale X upload claim recovered before dispatch'
+        END,
+        retry_count = CASE WHEN expires_at <= ? THEN retry_count ELSE retry_count + 1 END,
+        next_retry_at = CASE
+          WHEN expires_at <= ? OR retry_count + 1 > ? THEN NULL
+          ELSE ?
+        END,
         updated_at = ?
     WHERE platform = 'x' AND status = 'uploading' AND updated_at <= ?`,
+    now,
+    now,
+    now,
+    now,
+    now,
+    MAX_RETRY_COUNT,
     now,
     now,
     staleBefore,

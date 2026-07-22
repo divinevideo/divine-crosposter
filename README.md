@@ -98,7 +98,7 @@ Non-secret `[vars]` in `wrangler.toml`:
 | `KEYCAST_URL` | Base URL for Keycast bearer-token validation. Currently `https://login.divine.video`. |
 | `FUNNELCAKE_URL` | Base URL for Funnelcake event/video lookups. Currently `https://api.divine.video`. |
 | `OAUTH_REDIRECT_BASE` | Public Worker origin used to build OAuth callback URLs. Currently `https://crossposter.divine.video`. |
-| `ENABLE_INSTAGRAM` / `ENABLE_TIKTOK` / `ENABLE_X` / `ENABLE_YOUTUBE` | Set to `true` to expose a platform, only after its OAuth credentials are configured. In the committed config Instagram is `true` and the rest are `false`. |
+| `ENABLE_INSTAGRAM` / `ENABLE_TIKTOK` / `ENABLE_X` / `ENABLE_YOUTUBE` | Set to `true` to expose a platform, only after its OAuth credentials are configured. In the committed config Instagram and X are `true`; TikTok and YouTube are `false`. Before rotating X secrets, use a deployment override with `ENABLE_X=false`, then restore it only after the replacement credentials are configured. |
 | `INSTAGRAM_CLIENT_ID` | Meta app id used for Instagram OAuth. |
 | `YOUTUBE_DEFAULT_PRIVACY_STATUS` | Optional. One of `private`, `public`, or `unlisted`; defaults to `private`. |
 
@@ -195,6 +195,8 @@ npx wrangler d1 execute divine-crossposter --remote --command \
 ```
 
 The request stays unconsumed if either queue metrics lookup fails, the webhook secret is absent, or the webhook returns a non-2xx response. A successful receipt consumes only the oldest pending test request, after the webhook returns 2xx. The request ID is never included in the alert or logs.
+
+One-shot alert delivery is at-least-once. Overlapping scheduled runs, or a webhook success followed by a D1 consume failure, can deliver the same sanitized `notification_test` more than once. Receivers should handle duplicates; Crossposter still conditionally consumes the pending row and never adds its request ID to the payload.
 
 ## Deployment
 

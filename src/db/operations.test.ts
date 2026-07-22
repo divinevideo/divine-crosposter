@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { createOrGetJob } from './jobs'
+import { createOrGetJob, recoverStaleXClaims } from './jobs'
 import {
   countOverdueRunnableJobs,
   getOldestUnconsumedAlertTest,
@@ -48,8 +48,50 @@ describe('operations repository', () => {
         }),
       )
     }
+    for (const [id, errorCode, retryCount] of [
+      ['terminal_media', 'media_rejected', 0],
+      ['terminal_exhausted', 'unknown_platform_error', 6],
+      ['terminal_ambiguous', 'ambiguous_post_result', 0],
+    ] as const) {
+      await createOrGetJob(
+        db,
+        job({
+          id,
+          videoEventId: id.padEnd(64, '0'),
+          externalAccountId: id,
+          status: 'failed',
+          errorCode,
+          retryCount,
+          nextRetryAt: null,
+          createdAt: 1,
+          updatedAt: 1,
+          expiresAt: now + 10_000,
+        }),
+      )
+    }
 
     await expect(countOverdueRunnableJobs(db, now, grace)).resolves.toBe(3)
+  })
+
+  it('does not count a stale dispatch recovered for manual reconciliation as overdue', async () => {
+    const now = 10_000
+    await upsertConnection(db, connection({ id: 'conn_x', platform: 'x' }))
+    await createOrGetJob(
+      db,
+      job({
+        id: 'stale_dispatch',
+        platform: 'x',
+        connectionId: 'conn_x',
+        status: 'dispatching',
+        createdAt: 1,
+        updatedAt: 1,
+        expiresAt: now + 10_000,
+      }),
+    )
+
+    await recoverStaleXClaims(db, now, 300)
+
+    await expect(countOverdueRunnableJobs(db, now, 900)).resolves.toBe(0)
   })
 
   it('requests, reads oldest-first, and conditionally consumes a one-shot test', async () => {

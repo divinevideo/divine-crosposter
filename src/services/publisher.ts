@@ -4,6 +4,7 @@ import {
   claimJobForPublish,
   claimJobForStatusPoll,
   getJob,
+  MAX_RETRY_COUNT,
   transitionClaimToDispatching,
   updateClaimedJobStatus,
   updateJobStatus,
@@ -15,7 +16,6 @@ import { decryptToken, encryptToken, generateRandomId } from '../utils/crypto'
 import { sanitizeProviderMetadata } from '../utils/provider-metadata'
 
 const BACKOFF_SECONDS = [60, 300, 900, 1800, 3600] as const
-const MAX_RETRY_COUNT = BACKOFF_SECONDS.length
 
 export type ProcessCrosspostResult = {
   status: JobStatus | 'not_found'

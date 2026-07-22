@@ -225,6 +225,43 @@ describe('queue delivery lifecycle', () => {
     expect(current.retry).not.toHaveBeenCalled()
   })
 
+  it('keeps an earlier message acked when a later fresh send fails and leaves following messages untouched', async () => {
+    await seedConnectedJob(db, 'tiktok', { status: 'posted' })
+    await createOrGetJob(
+      db,
+      job({
+        id: 'job_2',
+        videoEventId: 'd'.repeat(64),
+        platform: 'tiktok',
+        status: 'processing',
+        externalPostId: 'publish-id',
+        nextRetryAt: 2_000,
+        expiresAt: 100_000,
+      }),
+    )
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        Response.json({ data: { status: 'PROCESSING_UPLOAD', publish_id: 'publish-id' }, error: { code: 'ok' } }),
+      ),
+    )
+    send.mockRejectedValueOnce(new Error('queue unavailable'))
+    const first = message('job_1')
+    const second = message('job_2')
+    const third = message('not_processed')
+
+    await expect(
+      worker.queue(batch(first.value, second.value, third.value), platformEnv(db, 'tiktok', send), {} as ExecutionContext),
+    ).rejects.toThrow('queue unavailable')
+
+    expect(first.ack).toHaveBeenCalledOnce()
+    expect(second.ack).not.toHaveBeenCalled()
+    expect(third.ack).not.toHaveBeenCalled()
+    expect(first.retry).not.toHaveBeenCalled()
+    expect(second.retry).not.toHaveBeenCalled()
+    expect(third.retry).not.toHaveBeenCalled()
+  })
+
   it('bounds X processing polls with fresh delayed messages and a terminal sixth poll', async () => {
     await seedConnectedJob(db, 'x')
     const fetchMock = vi

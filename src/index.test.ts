@@ -188,4 +188,120 @@ describe('scheduled handler', () => {
       .first<{ consumed_at: number | null }>()
     expect(consumed?.consumed_at).toEqual(expect.any(Number))
   })
+
+  it('runs the watchdog after reconciliation enqueue fails and rethrows the reconciliation failure', async () => {
+    const db = await applyMigrations()
+    const now = Math.floor(Date.now() / 1_000)
+    await upsertConnection(db, connection())
+    await createOrGetJob(db, job({ id: 'queued_for_watchdog', expiresAt: now + 10_000 }))
+    const reconciliationFailure = new Error('reconciliation queue unavailable')
+    const trace: string[] = []
+    const send = vi.fn().mockImplementation(async () => {
+      trace.push('reconciliation-send')
+      throw reconciliationFailure
+    })
+    const primaryMetrics = vi.fn().mockImplementation(async () => {
+      trace.push('primary-metrics')
+      return { backlogCount: 1, backlogBytes: 10 }
+    })
+    const dlqMetrics = vi.fn().mockImplementation(async () => {
+      trace.push('dlq-metrics')
+      return { backlogCount: 1, backlogBytes: 20 }
+    })
+    const fetchMock = vi.fn().mockImplementation(async () => {
+      trace.push('webhook')
+      return new Response(null, { status: 204 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      worker.scheduled(
+        {} as ScheduledEvent,
+        env({
+          DB: db,
+          CROSSPOST_QUEUE: { send, metrics: primaryMetrics } as unknown as Queue<{ jobId: string }>,
+          CROSSPOST_DLQ: { metrics: dlqMetrics } as unknown as Queue<unknown>,
+          OPS_ALERT_WEBHOOK_URL: 'https://alerts.example/private-hook',
+        }),
+        {} as ExecutionContext,
+      ),
+    ).rejects.toBe(reconciliationFailure)
+    expect(trace).toEqual(['reconciliation-send', 'primary-metrics', 'dlq-metrics', 'webhook'])
+  })
+
+  it('keeps reconciler recovery persisted when the watchdog webhook fails', async () => {
+    const db = await applyMigrations()
+    const now = Math.floor(Date.now() / 1_000)
+    await upsertConnection(db, connection({ id: 'conn_x', platform: 'x' }))
+    await createOrGetJob(
+      db,
+      job({
+        id: 'stale_before_watchdog_failure',
+        platform: 'x',
+        connectionId: 'conn_x',
+        status: 'uploading',
+        updatedAt: now - 1_000,
+        expiresAt: now + 10_000,
+      }),
+    )
+    const send = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 503 })))
+
+    await expect(
+      worker.scheduled(
+        {} as ScheduledEvent,
+        env({
+          DB: db,
+          CROSSPOST_QUEUE: {
+            send,
+            metrics: vi.fn().mockResolvedValue({ backlogCount: 1, backlogBytes: 10 }),
+          } as unknown as Queue<{ jobId: string }>,
+          CROSSPOST_DLQ: {
+            metrics: vi.fn().mockResolvedValue({ backlogCount: 1, backlogBytes: 20 }),
+          } as unknown as Queue<unknown>,
+          OPS_ALERT_WEBHOOK_URL: 'https://alerts.example/private-hook',
+        }),
+        {} as ExecutionContext,
+      ),
+    ).rejects.toThrow('operations alert webhook failed')
+    expect(send).toHaveBeenCalledWith({ jobId: 'stale_before_watchdog_failure' })
+    await expect(getJob(db, 'stale_before_watchdog_failure')).resolves.toMatchObject({
+      status: 'failed',
+      errorCode: 'unknown_platform_error',
+      retryCount: 1,
+      nextRetryAt: expect.any(Number),
+    })
+  })
+
+  it('surfaces both reconciliation and watchdog failures', async () => {
+    const db = await applyMigrations()
+    const now = Math.floor(Date.now() / 1_000)
+    await upsertConnection(db, connection())
+    await createOrGetJob(db, job({ id: 'queued_for_double_failure', expiresAt: now + 10_000 }))
+    const reconciliationFailure = new Error('reconciliation failed')
+    const watchdogFailure = new Error('watchdog metrics failed')
+    const send = vi.fn().mockRejectedValue(reconciliationFailure)
+    const primaryMetrics = vi.fn().mockRejectedValue(watchdogFailure)
+    const dlqMetrics = vi.fn().mockResolvedValue({ backlogCount: 0, backlogBytes: 0 })
+
+    let caught: unknown
+    try {
+      await worker.scheduled(
+        {} as ScheduledEvent,
+        env({
+          DB: db,
+          CROSSPOST_QUEUE: { send, metrics: primaryMetrics } as unknown as Queue<{ jobId: string }>,
+          CROSSPOST_DLQ: { metrics: dlqMetrics } as unknown as Queue<unknown>,
+        }),
+        {} as ExecutionContext,
+      )
+    } catch (error) {
+      caught = error
+    }
+
+    expect(caught).toBeInstanceOf(AggregateError)
+    expect((caught as AggregateError).errors).toEqual([reconciliationFailure, watchdogFailure])
+    expect(primaryMetrics).toHaveBeenCalledOnce()
+    expect(dlqMetrics).toHaveBeenCalledOnce()
+  })
 })
