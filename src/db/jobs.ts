@@ -263,6 +263,61 @@ export async function listRunnableJobs(db: D1Database, now: number, limit: numbe
   return rows.map(mapJob)
 }
 
+export async function recoverStalePollClaims(
+  db: D1Database,
+  now: number,
+  leaseSeconds: number,
+): Promise<{ pollRecovered: number; uploadRecovered: number }> {
+  const staleBefore = now - leaseSeconds
+  const poll = await runPrepared(
+    db,
+    `UPDATE jobs
+    SET status = CASE WHEN expires_at <= ? THEN 'skipped' ELSE 'processing' END,
+        error_code = CASE WHEN expires_at <= ? THEN 'expired' ELSE NULL END,
+        error_message = CASE
+          WHEN expires_at <= ? THEN 'crosspost job expired during stale claim recovery'
+          ELSE NULL
+        END,
+        next_retry_at = CASE WHEN expires_at <= ? THEN NULL ELSE ? END,
+        updated_at = ?
+    WHERE platform != 'x' AND status = 'uploading' AND updated_at <= ? AND external_post_id IS NOT NULL`,
+    now,
+    now,
+    now,
+    now,
+    now,
+    now,
+    staleBefore,
+  )
+  const upload = await runPrepared(
+    db,
+    `UPDATE jobs
+    SET status = CASE WHEN expires_at <= ? THEN 'skipped' ELSE 'failed' END,
+        error_code = CASE WHEN expires_at <= ? THEN 'expired' ELSE 'unknown_platform_error' END,
+        error_message = CASE
+          WHEN expires_at <= ? THEN 'crosspost job expired during stale claim recovery'
+          ELSE 'stale publish claim recovered before completion'
+        END,
+        retry_count = CASE WHEN expires_at <= ? THEN retry_count ELSE retry_count + 1 END,
+        next_retry_at = CASE
+          WHEN expires_at <= ? OR retry_count + 1 > ? THEN NULL
+          ELSE ?
+        END,
+        updated_at = ?
+    WHERE platform != 'x' AND status = 'uploading' AND updated_at <= ? AND external_post_id IS NULL`,
+    now,
+    now,
+    now,
+    now,
+    now,
+    MAX_RETRY_COUNT,
+    now,
+    now,
+    staleBefore,
+  )
+  return { pollRecovered: changes(poll), uploadRecovered: changes(upload) }
+}
+
 export async function recoverStaleXClaims(
   db: D1Database,
   now: number,

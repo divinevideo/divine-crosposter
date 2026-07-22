@@ -5,7 +5,7 @@ import {
   AUTO_RECONCILE_VIDEO_LIMIT_PER_USER,
 } from '../config'
 import { getCursor, upsertCursor } from '../db/cursors'
-import { listRunnableJobs, recoverStaleXClaims } from '../db/jobs'
+import { listRunnableJobs, recoverStalePollClaims, recoverStaleXClaims } from '../db/jobs'
 import { expireStartedOAuthAttempts } from '../db/oauth-attempts'
 import { deleteExpiredOAuthStates } from '../db/oauth-states'
 import { listAutomaticPreferences } from '../db/preferences'
@@ -67,6 +67,7 @@ export async function runAutoCrosspostReconciliation(
   const oauthAttemptsExpired = await expireStartedOAuthAttempts(env.DB, now)
   const oauthStatesDeleted = await deleteExpiredOAuthStates(env.DB, now)
   const { uploadingRecovered, dispatchingFailed } = await recoverStaleXClaims(env.DB, now, 5 * 60)
+  await recoverStalePollClaims(env.DB, now, 5 * 60)
 
   const runnableJobs = await listRunnableJobs(env.DB, now, AUTO_RECONCILE_QUEUED_JOB_LIMIT)
   for (const job of runnableJobs) {

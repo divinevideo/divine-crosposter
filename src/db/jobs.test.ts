@@ -6,6 +6,7 @@ import {
   getJob,
   listJobsForVideo,
   listRunnableJobs,
+  recoverStalePollClaims,
   recoverStaleXClaims,
   transitionClaimToDispatching,
   updateClaimedJobStatus,
@@ -132,6 +133,41 @@ describe('job repository', () => {
       expect.objectContaining({ id: 'processing_due' }),
       expect.objectContaining({ id: 'failed_due' }),
     ])
+  })
+
+  it('recovers stale poll-platform claims to processing with a container id, retryable failed without', async () => {
+    const now = 20_000
+    const leaseSeconds = 300
+    const stale = now - leaseSeconds
+    const make = async (id: string, platform: 'instagram' | 'tiktok' | 'x', externalPostId: string | null, updatedAt: number, expiresAt = now + 10_000) => {
+      await createOrGetJob(db, job({ id, videoEventId: id.padEnd(64, '0'), externalAccountId: id, platform, expiresAt }))
+      await updateJobStatus(db, { id, status: 'uploading', updatedAt, externalPostId })
+    }
+    await make('ig_poll_stale', 'instagram', 'container-1', stale)
+    await make('ig_upload_stale', 'instagram', null, stale)
+    await make('ig_fresh', 'instagram', 'container-2', stale + 1)
+    await make('ig_expired', 'instagram', 'container-3', stale, now)
+    await make('x_stale', 'x', null, stale)
+
+    await expect(recoverStalePollClaims(db, now, leaseSeconds)).resolves.toEqual({
+      pollRecovered: 2,
+      uploadRecovered: 1,
+    })
+    await expect(getJob(db, 'ig_poll_stale')).resolves.toMatchObject({
+      status: 'processing',
+      errorCode: null,
+      nextRetryAt: now,
+      updatedAt: now,
+    })
+    await expect(getJob(db, 'ig_upload_stale')).resolves.toMatchObject({
+      status: 'failed',
+      errorCode: 'unknown_platform_error',
+      retryCount: 1,
+      nextRetryAt: now,
+    })
+    await expect(getJob(db, 'ig_fresh')).resolves.toMatchObject({ status: 'uploading' })
+    await expect(getJob(db, 'ig_expired')).resolves.toMatchObject({ status: 'skipped', errorCode: 'expired' })
+    await expect(getJob(db, 'x_stale')).resolves.toMatchObject({ status: 'uploading' })
   })
 
   it('recovers only stale X upload and dispatch claims with terminal-safe outcomes', async () => {

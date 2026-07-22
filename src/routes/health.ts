@@ -224,12 +224,16 @@ function renderHome(env: Env): string {
         align-items: start;
       }
 
-      .video-panel {
-        grid-column: 2;
+      .flow-column {
+        display: flex;
+        flex-direction: column;
+        gap: 28px;
+        min-width: 0;
       }
 
-      .video-row {
-        grid-template-columns: auto 1fr auto;
+      .connect-row.video-row {
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        text-align: left;
       }
 
       .video-thumb {
@@ -528,9 +532,6 @@ function renderHome(env: Env): string {
           grid-template-columns: 1fr;
         }
 
-        .video-panel {
-          grid-column: auto;
-        }
 
         .connect-row,
         .preference-row {
@@ -629,19 +630,21 @@ function renderHome(env: Env): string {
             </div>
           </div>
 
-          <div class="panel">
-            <div class="flow-section">
-              <h2>Crossposting settings.</h2>
-              <p>Per platform: Off posts nothing, Manual lets you send each video yourself, Automatic sends every future Divine video for you.</p>
-              <div class="preference-list" id="preference-list"></div>
+          <div class="flow-column">
+            <div class="panel">
+              <div class="flow-section">
+                <h2>Crossposting settings.</h2>
+                <p>Per platform: Off posts nothing, Manual lets you send each video yourself, Automatic sends every future Divine video for you.</p>
+                <div class="preference-list" id="preference-list"></div>
+              </div>
             </div>
-          </div>
 
-          <div class="panel video-panel">
-            <div class="flow-section">
-              <h2>Post a video now.</h2>
-              <p>Your recent Divine videos. Send one to a connected platform whenever you like — same job either way, this is just the manual button.</p>
-              <div class="connect-list" id="video-list"></div>
+            <div class="panel">
+              <div class="flow-section">
+                <h2>Post a video now.</h2>
+                <p>Your recent Divine videos. Send one to a connected platform whenever you like — same job either way, this is just the manual button.</p>
+                <div class="connect-list" id="video-list"></div>
+              </div>
             </div>
           </div>
         </section>
