@@ -20,6 +20,13 @@ export type PublishInput = {
   mediaHash: string
   caption: string
   externalAccountId: string
+  beforeExternalPost?: () => Promise<void>
+}
+
+export type PollPublishInput = {
+  accessToken: string
+  providerResponse: Record<string, unknown>
+  beforeExternalPost?: () => Promise<void>
 }
 
 export type PublishResult = {
@@ -36,7 +43,7 @@ export interface PlatformAdapter {
   refreshToken(input: { refreshToken: string }): Promise<TokenSet>
   fetchAccount(input: { accessToken: string }): Promise<PlatformAccount>
   publishVideo(input: PublishInput): Promise<PublishResult>
-  pollPublishStatus?(input: { accessToken: string; providerResponse: Record<string, unknown> }): Promise<PublishResult>
+  pollPublishStatus?(input: PollPublishInput): Promise<PublishResult>
   revoke?(input: { accessToken: string; refreshToken?: string }): Promise<void>
 }
 
@@ -134,10 +141,51 @@ export function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
 }
 
-export async function fetchVideoBytes(platform: Platform, videoUrl: string): Promise<{ bytes: ArrayBuffer; contentType: string }> {
+export async function fetchVideoBytes(
+  platform: Platform,
+  videoUrl: string,
+  maxBytes?: number,
+): Promise<{ bytes: ArrayBuffer; contentType: string }> {
   const response = await fetch(videoUrl)
   if (!response.ok) {
     throw new PlatformAdapterError(platform, 'unknown_platform_error', 'failed to fetch source video', response.status)
+  }
+  if (maxBytes !== undefined) {
+    const declaredLength = Number(response.headers.get('content-length'))
+    if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+      throw new PlatformAdapterError(platform, 'media_rejected', 'source video exceeds upload size limit')
+    }
+
+    const reader = response.body?.getReader()
+    if (!reader) {
+      throw new PlatformAdapterError(platform, 'media_rejected', 'source video is empty')
+    }
+    const chunks: Uint8Array[] = []
+    let totalBytes = 0
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      totalBytes += value.byteLength
+      if (totalBytes > maxBytes) {
+        await reader.cancel().catch(() => undefined)
+        throw new PlatformAdapterError(platform, 'media_rejected', 'source video exceeds upload size limit')
+      }
+      chunks.push(value)
+    }
+    if (totalBytes === 0) {
+      throw new PlatformAdapterError(platform, 'media_rejected', 'source video is empty')
+    }
+
+    const bytes = new Uint8Array(totalBytes)
+    let offset = 0
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset)
+      offset += chunk.byteLength
+    }
+    return {
+      bytes: bytes.buffer,
+      contentType: response.headers.get('content-type') ?? 'video/mp4',
+    }
   }
   return {
     bytes: await response.arrayBuffer(),

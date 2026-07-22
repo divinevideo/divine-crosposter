@@ -1,16 +1,28 @@
 import { authenticateRequest } from '../auth/keycast'
 import {
+  completeConnectionSetup,
   disconnectConnection,
   getActiveConnectionForPlatform,
   getConnection,
   listConnections,
-  upsertConnection,
 } from '../db/connections'
+import { createOAuthAttempt, updateOAuthAttempt } from '../db/oauth-attempts'
 import { consumeOAuthState, createOAuthState } from '../db/oauth-states'
 import { getPreferences, setPreference } from '../db/preferences'
-import { loadConfig } from '../config'
+import { loadConfig, oauthRedirectBase } from '../config'
 import { getAdapter } from '../platforms/registry'
-import type { ConnectionRecord, Env, Platform, PreferenceMode, PreferenceRecord } from '../types'
+import { PlatformAdapterError } from '../platforms/adapter'
+import type { PlatformAccount, PlatformAdapter, TokenSet } from '../platforms/adapter'
+import type {
+  ConnectionRecord,
+  Env,
+  OAuthAttemptFailureCode,
+  OAuthAttemptStatus,
+  OAuthStateRecord,
+  Platform,
+  PreferenceMode,
+  PreferenceRecord,
+} from '../types'
 import { decryptToken, encryptToken, generatePKCE, generateRandomId } from '../utils/crypto'
 import { HttpError } from '../utils/http'
 import { sanitizeProviderMetadata } from '../utils/provider-metadata'
@@ -45,7 +57,7 @@ function nowSeconds(): number {
 }
 
 function callbackRedirectUri(env: Env, platform: Platform): string {
-  return `${loadConfig(env).oauthRedirectBase}/connections/${platform}/callback`
+  return `${oauthRedirectBase(env)}/connections/${platform}/callback`
 }
 
 function connectionSummary(connection: ConnectionRecord): ConnectionSummary {
@@ -74,7 +86,12 @@ function preferenceSummary(preference: PreferenceRecord): PreferenceSummary {
   }
 }
 
-type ConnectionFailureReason = 'provider_denied'
+type ConnectionFailureReason =
+  | 'provider_denied'
+  | 'callback_failed'
+  | 'token_exchange_failed'
+  | 'account_lookup_failed'
+  | 'storage_failed'
 
 function redirectWithResult(
   returnUrl: string,
@@ -93,31 +110,73 @@ function redirectWithResult(
 }
 
 function redirectBase(env: Env): string {
-  return loadConfig(env).oauthRedirectBase
+  return oauthRedirectBase(env)
 }
 
-async function setManualPreferenceAfterConnect(
-  db: D1Database,
-  pubkey: string,
-  platform: Platform,
-  connectionId: string,
-  now: number,
-): Promise<void> {
-  const preferences = await getPreferences(db, pubkey)
-  const existing = preferences.find((preference) => preference.platform === platform)
-  if (existing?.mode === 'manual' || existing?.mode === 'automatic') {
-    return
+export function attemptIdFromState(state: OAuthStateRecord): string | null {
+  try {
+    const metadata = JSON.parse(state.metadataJson) as unknown
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+      return null
+    }
+    const attemptId = (metadata as Record<string, unknown>).attemptId
+    return typeof attemptId === 'string' && attemptId.length > 0 ? attemptId : null
+  } catch {
+    return null
   }
+}
 
-  await setPreference(db, {
-    pubkey,
+export function providerStatus(error: unknown): number | null {
+  return error instanceof PlatformAdapterError ? error.providerStatus ?? null : null
+}
+
+function logAttemptTransition(
+  attemptId: string,
+  platform: Platform,
+  status: OAuthAttemptStatus,
+  failureCode: OAuthAttemptFailureCode | null,
+  error?: unknown,
+): void {
+  console.info(JSON.stringify({
+    event: 'oauth_callback_transition',
+    attemptId,
     platform,
-    connectionId,
-    mode: 'manual',
-    automaticEnabledAt: null,
-    createdAt: existing?.createdAt ?? now,
-    updatedAt: now,
+    status,
+    failureCode,
+    providerStatus: providerStatus(error),
+  }))
+}
+
+export async function transitionAttempt(
+  env: Env,
+  attemptId: string | null,
+  platform: Platform,
+  status: OAuthAttemptStatus,
+  failureCode: OAuthAttemptFailureCode | null,
+  error?: unknown,
+): Promise<void> {
+  if (!attemptId) return
+  await updateOAuthAttempt(env.DB, {
+    id: attemptId,
+    status,
+    failureCode,
+    providerStatus: providerStatus(error),
+    updatedAt: nowSeconds(),
   })
+  logAttemptTransition(attemptId, platform, status, failureCode, error)
+}
+
+async function failureRedirect(
+  env: Env,
+  state: OAuthStateRecord,
+  redirectPlatform: Platform,
+  reason: ConnectionFailureReason,
+  error?: unknown,
+): Promise<string> {
+  const attemptId = attemptIdFromState(state)
+  await transitionAttempt(env, attemptId, state.platform, reason, reason, error).catch(() => undefined)
+  const redirectReason = attemptId || reason === 'provider_denied' ? reason : undefined
+  return redirectWithResult(state.returnUrl, redirectPlatform, 'failed', redirectReason)
 }
 
 async function disablePreferenceForConnection(
@@ -165,18 +224,37 @@ export async function startConnection(
   const returnUrl = assertAllowedReturnUrl(returnUrlValue, config.oauthRedirectBase)
   const now = nowSeconds()
   const state = generateRandomId(24)
+  const attemptId = `oauth_attempt_${generateRandomId(16)}`
   const pkce = await generatePKCE()
+  const expiresAt = now + OAUTH_STATE_TTL_SECONDS
 
-  await createOAuthState(env.DB, {
-    stateId: state,
+  await createOAuthAttempt(env.DB, {
+    id: attemptId,
     pubkey,
     platform,
-    codeVerifier: pkce.verifier,
-    returnUrl,
+    status: 'started',
+    failureCode: null,
+    providerStatus: null,
     createdAt: now,
-    expiresAt: now + OAUTH_STATE_TTL_SECONDS,
-    metadataJson: '{}',
+    expiresAt,
+    updatedAt: now,
   })
+
+  try {
+    await createOAuthState(env.DB, {
+      stateId: state,
+      pubkey,
+      platform,
+      codeVerifier: pkce.verifier,
+      returnUrl,
+      createdAt: now,
+      expiresAt,
+      metadataJson: JSON.stringify({ attemptId }),
+    })
+  } catch (error) {
+    await transitionAttempt(env, attemptId, platform, 'storage_failed', 'storage_failed', error).catch(() => undefined)
+    throw error
+  }
 
   return {
     state,
@@ -197,42 +275,74 @@ export async function completeConnectionCallback(
   providerErrorReason: string | null = null,
 ): Promise<string> {
   const platform = parsePlatform(platformValue)
-  const fallbackRedirect = redirectWithResult(redirectBase(env), platform, 'failed')
   if (!stateId) {
-    return fallbackRedirect
+    return redirectWithResult(redirectBase(env), platform, 'failed')
   }
 
   const state = await consumeOAuthState(env.DB, stateId, nowSeconds())
   if (!state) {
-    return fallbackRedirect
+    return redirectWithResult(redirectBase(env), platform, 'failed')
   }
 
-  const failureRedirect = redirectWithResult(state.returnUrl, platform, 'failed')
   if (state.platform !== platform) {
-    return failureRedirect
+    return failureRedirect(env, state, platform, 'callback_failed')
   }
 
-  if (providerError || providerErrorReason || !code) {
-    const reason = providerError === 'access_denied' || providerErrorReason === 'user_denied'
-      ? 'provider_denied'
-      : undefined
-    return redirectWithResult(state.returnUrl, platform, 'failed', reason)
+  if (providerError || providerErrorReason) {
+    const denied = [providerError, providerErrorReason].some(
+      (value) => value === 'access_denied' || value === 'user_denied',
+    )
+    return failureRedirect(env, state, platform, denied ? 'provider_denied' : 'callback_failed')
   }
 
-  const adapter = getAdapter(env, platform)
-  if (!adapter) {
-    return failureRedirect
+  if (!code) {
+    return failureRedirect(env, state, platform, 'callback_failed')
   }
 
+  let adapter: PlatformAdapter | null
+  let redirectUri: string
   try {
-    const tokens = await adapter.exchangeCallback({
+    adapter = getAdapter(env, platform)
+    redirectUri = callbackRedirectUri(env, platform)
+  } catch {
+    return failureRedirect(env, state, platform, 'callback_failed')
+  }
+  if (!adapter) {
+    return failureRedirect(env, state, platform, 'callback_failed')
+  }
+
+  let tokens: TokenSet
+  try {
+    tokens = await adapter.exchangeCallback({
       code,
-      redirectUri: callbackRedirectUri(env, platform),
+      redirectUri,
       codeVerifier: state.codeVerifier ?? undefined,
     })
-    const account = await adapter.fetchAccount({ accessToken: tokens.accessToken })
-    const now = nowSeconds()
-    const connection = await upsertConnection(env.DB, {
+  } catch (error) {
+    return failureRedirect(env, state, platform, 'token_exchange_failed', error)
+  }
+
+  let account: PlatformAccount
+  try {
+    account = await adapter.fetchAccount({ accessToken: tokens.accessToken })
+  } catch (error) {
+    return failureRedirect(env, state, platform, 'account_lookup_failed', error)
+  }
+
+  if (!account.id) {
+    return failureRedirect(
+      env,
+      state,
+      platform,
+      'account_lookup_failed',
+      new PlatformAdapterError(platform, 'unknown_platform_error', 'provider account ID was empty', 200),
+    )
+  }
+
+  const now = nowSeconds()
+  let connectionInput: ConnectionRecord
+  try {
+    connectionInput = {
       id: `conn_${generateRandomId(16)}`,
       pubkey: state.pubkey,
       platform,
@@ -252,12 +362,33 @@ export async function completeConnectionCallback(
         account: sanitizeProviderMetadata(account.metadata),
         token: sanitizeProviderMetadata(tokens.metadata),
       }),
-    })
+    }
+  } catch (error) {
+    return failureRedirect(env, state, platform, 'storage_failed', error)
+  }
 
-    await setManualPreferenceAfterConnect(env.DB, state.pubkey, platform, connection.id, now)
+  const attemptId = attemptIdFromState(state)
+  try {
+    await completeConnectionSetup(env.DB, {
+      connection: connectionInput,
+      preference: {
+        pubkey: state.pubkey,
+        platform,
+        connectionId: connectionInput.id,
+        mode: 'manual',
+        automaticEnabledAt: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+      attemptId,
+      now,
+    })
+    if (attemptId) {
+      logAttemptTransition(attemptId, platform, 'connected', null)
+    }
     return redirectWithResult(state.returnUrl, platform, 'connected')
-  } catch {
-    return failureRedirect
+  } catch (error) {
+    return failureRedirect(env, state, platform, 'storage_failed', error)
   }
 }
 

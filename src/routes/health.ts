@@ -602,6 +602,16 @@ function renderHome(env: Env): string {
         el.style.borderColor = type === 'error' ? 'rgba(255,127,175,0.55)' : 'rgba(39,197,139,0.45)';
       }
 
+      function connectionFailureMessage(platform, reason) {
+        if (platform !== 'x') return 'Platform connection failed. Try again when you are ready.';
+        if (reason === 'provider_denied') return 'X authorization was canceled or denied.';
+        if (reason === 'callback_failed') return 'X did not return a usable authorization response. Try again.';
+        if (reason === 'token_exchange_failed') return 'X did not complete authorization. Check the callback setting and try again.';
+        if (reason === 'account_lookup_failed') return 'X authorized, but the account could not be loaded. Try again.';
+        if (reason === 'storage_failed') return 'X authorized, but Crossposter could not save the connection. Try again.';
+        return 'Platform connection failed. Try again when you are ready.';
+      }
+
       function renderAuthControls() {
         const signedIn = !!session;
         for (const id of ['login-button', 'login-button-secondary']) {
@@ -937,10 +947,7 @@ function renderHome(env: Env): string {
           setStatus(platformName(params.get('platform')) + ' connected.');
         }
         if (params.get('connection') === 'failed') {
-          const message = params.get('reason') === 'provider_denied'
-            ? platformName(params.get('platform')) + ' authorization was canceled or denied.'
-            : 'Platform connection failed. Try again when you are ready.';
-          setStatus(message, 'error');
+          setStatus(connectionFailureMessage(params.get('platform'), params.get('reason')), 'error');
         }
         if (params.has('connection')) {
           params.delete('connection');

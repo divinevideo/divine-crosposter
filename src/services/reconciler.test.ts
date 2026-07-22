@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { getCursor, upsertCursor } from '../db/cursors'
 import { upsertConnection } from '../db/connections'
 import { createOrGetJob, listJobsForVideo } from '../db/jobs'
+import { createOAuthAttempt, getOAuthAttempt } from '../db/oauth-attempts'
+import { createOAuthState } from '../db/oauth-states'
 import { setPreference } from '../db/preferences'
 import { applyMigrations, connection, job, PUBKEY_A, VIDEO_EVENT_ID } from '../db/test-helpers'
 import type { Env, Platform, PreferenceMode } from '../types'
@@ -110,8 +112,50 @@ describe('automatic crosspost reconciler', () => {
 
     const result = await runAutoCrosspostReconciliation(env(db, queueSend), { now: 3_000 })
 
-    expect(result).toEqual({ usersChecked: 0, eventsChecked: 0, jobsCreatedOrFound: 0, queuedJobsEnqueued: 0 })
+    expect(result).toEqual({
+      usersChecked: 0,
+      eventsChecked: 0,
+      jobsCreatedOrFound: 0,
+      queuedJobsEnqueued: 0,
+      oauthAttemptsExpired: 0,
+      oauthStatesDeleted: 0,
+      uploadingRecovered: 0,
+      dispatchingFailed: 0,
+    })
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('expires abandoned OAuth starts and deletes their expired states', async () => {
+    await createOAuthAttempt(db, {
+      id: 'oauth_attempt_abandoned',
+      pubkey: PUBKEY_A,
+      platform: 'x',
+      status: 'started',
+      failureCode: null,
+      providerStatus: null,
+      createdAt: 1_000,
+      expiresAt: 2_000,
+      updatedAt: 1_000,
+    })
+    await createOAuthState(db, {
+      stateId: 'expired-private-state',
+      pubkey: PUBKEY_A,
+      platform: 'x',
+      codeVerifier: 'expired-private-verifier',
+      returnUrl: 'https://divine.video/settings/crossposting',
+      createdAt: 1_000,
+      expiresAt: 2_000,
+      metadataJson: JSON.stringify({ attemptId: 'oauth_attempt_abandoned' }),
+    })
+
+    const result = await runAutoCrosspostReconciliation(env(db, queueSend), { now: 3_000 })
+
+    expect(result.oauthAttemptsExpired).toBe(1)
+    expect(result.oauthStatesDeleted).toBe(1)
+    await expect(getOAuthAttempt(db, 'oauth_attempt_abandoned')).resolves.toMatchObject({ status: 'expired' })
+    await expect(
+      db.prepare('SELECT state_id FROM oauth_states WHERE state_id = ?').bind('expired-private-state').first(),
+    ).resolves.toBeNull()
   })
 
   it('advances cursor after inspected videos', async () => {
@@ -181,5 +225,34 @@ describe('automatic crosspost reconciler', () => {
 
     expect(result).toMatchObject({ queuedJobsEnqueued: 1 })
     expect(queueSend).toHaveBeenCalledWith({ jobId: 'job_stranded' })
+  })
+
+  it('recovers stale X claims before enqueueing and never requeues ambiguous dispatches', async () => {
+    await upsertConnection(db, connection({ id: 'conn_x', platform: 'x' }))
+    await createOrGetJob(
+      db,
+      job({ id: 'stale_upload', platform: 'x', connectionId: 'conn_x', status: 'uploading', updatedAt: 2_699 }),
+    )
+    await createOrGetJob(
+      db,
+      job({
+        id: 'stale_dispatch',
+        videoEventId: VIDEO_EVENT_ID_2,
+        externalAccountId: 'second-account',
+        platform: 'x',
+        connectionId: 'conn_x',
+        status: 'dispatching',
+        updatedAt: 2_699,
+      }),
+    )
+
+    const result = await runAutoCrosspostReconciliation(env(db, queueSend), { now: 3_000 })
+
+    expect(result).toMatchObject({ uploadingRecovered: 1, dispatchingFailed: 1, queuedJobsEnqueued: 1 })
+    expect(queueSend).toHaveBeenCalledTimes(1)
+    expect(queueSend).toHaveBeenCalledWith({ jobId: 'stale_upload' })
+    await expect(listJobsForVideo(db, PUBKEY_A, VIDEO_EVENT_ID_2)).resolves.toEqual([
+      expect.objectContaining({ status: 'failed', errorCode: 'ambiguous_post_result', nextRetryAt: null }),
+    ])
   })
 })

@@ -1,5 +1,6 @@
 import type { Env, Platform } from '../types'
-import { loadConfig } from '../config'
+import { loadConfig, parseYouTubePrivacyStatus } from '../config'
+import type { YouTubePrivacyStatus } from '../config'
 import type { PlatformAdapter } from './adapter'
 import { createInstagramAdapter } from './instagram'
 import { createTikTokAdapter } from './tiktok'
@@ -48,44 +49,11 @@ function isConfigured(env: Env, platform: Platform): boolean {
 }
 
 export function getEnabledAdapters(env: Env): PlatformAdapter[] {
-  const adapters: PlatformAdapter[] = []
   const config = loadConfig(env)
-  const {
-    INSTAGRAM_CLIENT_ID,
-    INSTAGRAM_CLIENT_SECRET,
-    TIKTOK_CLIENT_KEY,
-    TIKTOK_CLIENT_SECRET,
-    TWITTER_CLIENT_ID,
-    TWITTER_CLIENT_SECRET,
-    GOOGLE_CLIENT_ID,
-    GOOGLE_CLIENT_SECRET,
-  } = env
-
-  if (enabled(env.ENABLE_INSTAGRAM) && INSTAGRAM_CLIENT_ID && INSTAGRAM_CLIENT_SECRET) {
-    adapters.push(
-      createInstagramAdapter({
-        clientId: INSTAGRAM_CLIENT_ID,
-        clientSecret: INSTAGRAM_CLIENT_SECRET,
-      }),
-    )
-  }
-  if (enabled(env.ENABLE_TIKTOK) && TIKTOK_CLIENT_KEY && TIKTOK_CLIENT_SECRET) {
-    adapters.push(createTikTokAdapter({ clientKey: TIKTOK_CLIENT_KEY, clientSecret: TIKTOK_CLIENT_SECRET }))
-  }
-  if (enabled(env.ENABLE_X) && TWITTER_CLIENT_ID && TWITTER_CLIENT_SECRET) {
-    adapters.push(createXAdapter({ clientId: TWITTER_CLIENT_ID, clientSecret: TWITTER_CLIENT_SECRET }))
-  }
-  if (enabled(env.ENABLE_YOUTUBE) && GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET) {
-    adapters.push(
-      createYouTubeAdapter({
-        clientId: GOOGLE_CLIENT_ID,
-        clientSecret: GOOGLE_CLIENT_SECRET,
-        defaultPrivacyStatus: config.youtubeDefaultPrivacyStatus,
-      }),
-    )
-  }
-
-  return adapters
+  return PLATFORM_ORDER.flatMap((platform) => {
+    const adapter = configuredAdapter(env, platform, config.youtubeDefaultPrivacyStatus)
+    return adapter ? [adapter] : []
+  })
 }
 
 export function getProviderSummaries(env: Env): ProviderSummary[] {
@@ -97,5 +65,42 @@ export function getProviderSummaries(env: Env): ProviderSummary[] {
 }
 
 export function getAdapter(env: Env, platform: Platform): PlatformAdapter | null {
-  return getEnabledAdapters(env).find((adapter) => adapter.platform === platform) ?? null
+  return configuredAdapter(env, platform)
+}
+
+function configuredAdapter(
+  env: Env,
+  platform: Platform,
+  youtubePrivacyStatus?: YouTubePrivacyStatus,
+): PlatformAdapter | null {
+  switch (platform) {
+    case 'instagram': {
+      const { INSTAGRAM_CLIENT_ID, INSTAGRAM_CLIENT_SECRET } = env
+      return hasInstagram(env) && INSTAGRAM_CLIENT_ID && INSTAGRAM_CLIENT_SECRET
+        ? createInstagramAdapter({ clientId: INSTAGRAM_CLIENT_ID, clientSecret: INSTAGRAM_CLIENT_SECRET })
+        : null
+    }
+    case 'tiktok': {
+      const { TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET } = env
+      return hasTikTok(env) && TIKTOK_CLIENT_KEY && TIKTOK_CLIENT_SECRET
+        ? createTikTokAdapter({ clientKey: TIKTOK_CLIENT_KEY, clientSecret: TIKTOK_CLIENT_SECRET })
+        : null
+    }
+    case 'x': {
+      const { TWITTER_CLIENT_ID, TWITTER_CLIENT_SECRET } = env
+      return hasX(env) && TWITTER_CLIENT_ID && TWITTER_CLIENT_SECRET
+        ? createXAdapter({ clientId: TWITTER_CLIENT_ID, clientSecret: TWITTER_CLIENT_SECRET })
+        : null
+    }
+    case 'youtube': {
+      const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET } = env
+      return hasYouTube(env) && GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET
+        ? createYouTubeAdapter({
+            clientId: GOOGLE_CLIENT_ID,
+            clientSecret: GOOGLE_CLIENT_SECRET,
+            defaultPrivacyStatus: youtubePrivacyStatus ?? parseYouTubePrivacyStatus(env.YOUTUBE_DEFAULT_PRIVACY_STATUS),
+          })
+        : null
+    }
+  }
 }

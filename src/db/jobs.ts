@@ -1,6 +1,8 @@
 import { allPrepared, changes, firstPrepared, runPrepared } from './client'
 import type { CreateJobInput, ErrorCode, JobRecord, JobStatus, Platform, UpdateJobStatusInput } from '../types'
 
+export const MAX_RETRY_COUNT = 5
+
 type JobRow = {
   id: string
   pubkey: string
@@ -129,6 +131,12 @@ export async function getJob(db: D1Database, id: string, pubkey?: string): Promi
 }
 
 export async function updateJobStatus(db: D1Database, input: UpdateJobStatusInput): Promise<void> {
+  const { assignments, bindings } = jobStatusUpdate(input)
+  bindings.push(input.id)
+  await runPrepared(db, `UPDATE jobs SET ${assignments.join(', ')} WHERE id = ?`, ...bindings)
+}
+
+function jobStatusUpdate(input: UpdateJobStatusInput): { assignments: string[]; bindings: unknown[] } {
   const assignments = ['status = ?', 'updated_at = ?']
   const bindings: unknown[] = [input.status, input.updatedAt]
 
@@ -152,8 +160,27 @@ export async function updateJobStatus(db: D1Database, input: UpdateJobStatusInpu
     bindings.push(input.retryCount)
   }
 
-  bindings.push(input.id)
-  await runPrepared(db, `UPDATE jobs SET ${assignments.join(', ')} WHERE id = ?`, ...bindings)
+  return { assignments, bindings }
+}
+
+export async function updateClaimedJobStatus(
+  db: D1Database,
+  input: UpdateJobStatusInput,
+  expected: { status: JobStatus; updatedAt: number },
+): Promise<JobRecord | null> {
+  const { assignments, bindings } = jobStatusUpdate(input)
+  const row = await firstPrepared<JobRow>(
+    db,
+    `UPDATE jobs
+    SET ${assignments.join(', ')}
+    WHERE id = ? AND status = ? AND updated_at = ?
+    RETURNING *`,
+    ...bindings,
+    input.id,
+    expected.status,
+    expected.updatedAt,
+  )
+  return row ? mapJob(row) : null
 }
 
 export async function claimJobForPublish(db: D1Database, id: string, now: number): Promise<JobRecord | null> {
@@ -192,18 +219,93 @@ export async function claimJobForStatusPoll(db: D1Database, id: string, now: num
   return row ? mapJob(row) : null
 }
 
+export async function transitionClaimToDispatching(
+  db: D1Database,
+  id: string,
+  claimUpdatedAt: number,
+  now: number,
+): Promise<boolean> {
+  const job = await updateClaimedJobStatus(
+    db,
+    {
+      id,
+      status: 'dispatching',
+      updatedAt: now,
+      errorCode: null,
+      errorMessage: null,
+      nextRetryAt: null,
+    },
+    { status: 'uploading', updatedAt: claimUpdatedAt },
+  )
+  return job !== null
+}
+
 export async function listRunnableJobs(db: D1Database, now: number, limit: number): Promise<JobRecord[]> {
   const rows = await allPrepared<JobRow>(
     db,
     `SELECT * FROM jobs
-    WHERE status IN ('queued', 'failed')
+    WHERE (
+        (status IN ('queued', 'processing') AND (next_retry_at IS NULL OR next_retry_at <= ?))
+        OR (
+          status = 'failed'
+          AND next_retry_at IS NOT NULL
+          AND next_retry_at <= ?
+        )
+      )
       AND expires_at > ?
-      AND (next_retry_at IS NULL OR next_retry_at <= ?)
     ORDER BY COALESCE(next_retry_at, created_at) ASC, created_at ASC
     LIMIT ?`,
+    now,
     now,
     now,
     limit,
   )
   return rows.map(mapJob)
+}
+
+export async function recoverStaleXClaims(
+  db: D1Database,
+  now: number,
+  leaseSeconds: number,
+): Promise<{ uploadingRecovered: number; dispatchingFailed: number }> {
+  const staleBefore = now - leaseSeconds
+  const uploading = await runPrepared(
+    db,
+    `UPDATE jobs
+    SET status = CASE WHEN expires_at <= ? THEN 'skipped' ELSE 'failed' END,
+        error_code = CASE WHEN expires_at <= ? THEN 'expired' ELSE 'unknown_platform_error' END,
+        error_message = CASE
+          WHEN expires_at <= ? THEN 'crosspost job expired during stale claim recovery'
+          ELSE 'stale X upload claim recovered before dispatch'
+        END,
+        retry_count = CASE WHEN expires_at <= ? THEN retry_count ELSE retry_count + 1 END,
+        next_retry_at = CASE
+          WHEN expires_at <= ? OR retry_count + 1 > ? THEN NULL
+          ELSE ?
+        END,
+        updated_at = ?
+    WHERE platform = 'x' AND status = 'uploading' AND updated_at <= ?`,
+    now,
+    now,
+    now,
+    now,
+    now,
+    MAX_RETRY_COUNT,
+    now,
+    now,
+    staleBefore,
+  )
+  const dispatching = await runPrepared(
+    db,
+    `UPDATE jobs
+    SET status = 'failed',
+        error_code = 'ambiguous_post_result',
+        error_message = 'stale X dispatch requires manual reconciliation',
+        next_retry_at = NULL,
+        updated_at = ?
+    WHERE platform = 'x' AND status = 'dispatching' AND updated_at <= ?`,
+    now,
+    staleBefore,
+  )
+  return { uploadingRecovered: changes(uploading), dispatchingFailed: changes(dispatching) }
 }

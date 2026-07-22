@@ -1,6 +1,16 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { upsertConnection } from './connections'
-import { createOrGetJob, getJob, listJobsForVideo, listRunnableJobs, updateJobStatus } from './jobs'
+import {
+  claimJobForPublish,
+  createOrGetJob,
+  getJob,
+  listJobsForVideo,
+  listRunnableJobs,
+  recoverStaleXClaims,
+  transitionClaimToDispatching,
+  updateClaimedJobStatus,
+  updateJobStatus,
+} from './jobs'
 import { applyMigrations, connection, job, PUBKEY_A, VIDEO_EVENT_ID } from './test-helpers'
 
 describe('job repository', () => {
@@ -87,6 +97,158 @@ describe('job repository', () => {
     await expect(listRunnableJobs(db, 1_500, 10)).resolves.toEqual([created])
   })
 
+  it('lists due queued, failed, and processing jobs but excludes claims, future retries, expired and terminal jobs', async () => {
+    const now = 3_000
+    const candidates = [
+      ['queued_due', 'queued', null, now + 1_000, null],
+      ['failed_due', 'failed', now, now + 1_000, 'media_rejected'],
+      ['processing_due', 'processing', now - 1, now + 1_000, null],
+      ['queued_future', 'queued', now + 1, now + 1_000, null],
+      ['failed_future', 'failed', now + 1, now + 1_000, 'unknown_platform_error'],
+      ['failed_terminal', 'failed', null, now + 1_000, 'media_rejected'],
+      ['uploading', 'uploading', null, now + 1_000, null],
+      ['dispatching', 'dispatching', null, now + 1_000, null],
+      ['posted', 'posted', null, now + 1_000, null],
+      ['needs_reauth', 'needs_reauth', null, now + 1_000, null],
+      ['expired', 'queued', null, now, null],
+    ] as const
+    for (const [id, status, nextRetryAt, expiresAt, errorCode] of candidates) {
+      await createOrGetJob(
+        db,
+        job({
+          id,
+          videoEventId: id.padEnd(64, '0'),
+          externalAccountId: id,
+          status,
+          nextRetryAt,
+          expiresAt,
+          errorCode,
+        }),
+      )
+    }
+
+    await expect(listRunnableJobs(db, now, 20)).resolves.toEqual([
+      expect.objectContaining({ id: 'queued_due' }),
+      expect.objectContaining({ id: 'processing_due' }),
+      expect.objectContaining({ id: 'failed_due' }),
+    ])
+  })
+
+  it('recovers only stale X upload and dispatch claims with terminal-safe outcomes', async () => {
+    const now = 10_000
+    const leaseSeconds = 300
+    const candidates = [
+      ['stale_upload', 'x', 'uploading', now - leaseSeconds, 2],
+      ['stale_dispatch', 'x', 'dispatching', now - leaseSeconds - 1, 3],
+      ['fresh_upload', 'x', 'uploading', now - leaseSeconds + 1, 4],
+      ['fresh_dispatch', 'x', 'dispatching', now - leaseSeconds + 1, 4],
+      ['other_upload', 'tiktok', 'uploading', now - 9_000, 5],
+      ['other_dispatch', 'tiktok', 'dispatching', now - 9_000, 5],
+      ['other_status', 'x', 'processing', now - 9_000, 6],
+    ] as const
+    for (const [id, platform, status, updatedAt, retryCount] of candidates) {
+      await createOrGetJob(
+        db,
+        job({
+          id,
+          videoEventId: id.padEnd(64, '0'),
+          externalAccountId: id,
+          platform,
+          status,
+          updatedAt,
+          retryCount,
+        }),
+      )
+    }
+    for (const [id, retryCount, expiresAt] of [
+      ['retry_boundary', 4, now + 10_000],
+      ['retry_exhausted', 5, now + 10_000],
+      ['expired_upload', 1, now],
+    ] as const) {
+      await createOrGetJob(
+        db,
+        job({
+          id,
+          videoEventId: id.padEnd(64, '0'),
+          externalAccountId: id,
+          platform: 'x',
+          status: 'uploading',
+          updatedAt: now - leaseSeconds,
+          retryCount,
+          expiresAt,
+        }),
+      )
+    }
+
+    await expect(recoverStaleXClaims(db, now, leaseSeconds)).resolves.toEqual({
+      uploadingRecovered: 4,
+      dispatchingFailed: 1,
+    })
+    await expect(getJob(db, 'stale_upload')).resolves.toMatchObject({
+      status: 'failed',
+      errorCode: 'unknown_platform_error',
+      errorMessage: 'stale X upload claim recovered before dispatch',
+      retryCount: 3,
+      nextRetryAt: now,
+      updatedAt: now,
+    })
+    await expect(getJob(db, 'stale_dispatch')).resolves.toMatchObject({
+      status: 'failed',
+      errorCode: 'ambiguous_post_result',
+      errorMessage: 'stale X dispatch requires manual reconciliation',
+      retryCount: 3,
+      nextRetryAt: null,
+      updatedAt: now,
+    })
+    await expect(getJob(db, 'retry_boundary')).resolves.toMatchObject({
+      status: 'failed',
+      errorCode: 'unknown_platform_error',
+      retryCount: 5,
+      nextRetryAt: now,
+    })
+    await expect(getJob(db, 'retry_exhausted')).resolves.toMatchObject({
+      status: 'failed',
+      errorCode: 'unknown_platform_error',
+      retryCount: 6,
+      nextRetryAt: null,
+    })
+    await expect(getJob(db, 'expired_upload')).resolves.toMatchObject({
+      status: 'skipped',
+      errorCode: 'expired',
+      retryCount: 1,
+      nextRetryAt: null,
+    })
+    const runnableIds = (await listRunnableJobs(db, now, 20)).map((candidate) => candidate.id)
+    expect(runnableIds).toEqual(expect.arrayContaining(['other_status', 'stale_upload', 'retry_boundary']))
+    expect(runnableIds).not.toEqual(expect.arrayContaining(['retry_exhausted', 'expired_upload', 'stale_dispatch']))
+    await expect(recoverStaleXClaims(db, now, leaseSeconds)).resolves.toEqual({
+      uploadingRecovered: 0,
+      dispatchingFailed: 0,
+    })
+    await expect(getJob(db, 'fresh_upload')).resolves.toMatchObject({ status: 'uploading', retryCount: 4 })
+    await expect(getJob(db, 'fresh_dispatch')).resolves.toMatchObject({ status: 'dispatching', retryCount: 4 })
+    await expect(getJob(db, 'other_upload')).resolves.toMatchObject({ status: 'uploading', retryCount: 5 })
+    await expect(getJob(db, 'other_dispatch')).resolves.toMatchObject({ status: 'dispatching', retryCount: 5 })
+  })
+
+  it('prevents a recovered stale worker claim token from mutating a reclaimed job', async () => {
+    await createOrGetJob(db, job({ id: 'recovered_claim', platform: 'x' }))
+    const stale = await claimJobForPublish(db, 'recovered_claim', 1_000)
+    expect(stale).toMatchObject({ status: 'uploading', updatedAt: 1_000 })
+    await recoverStaleXClaims(db, 2_000, 300)
+    const current = await claimJobForPublish(db, 'recovered_claim', 2_001)
+    expect(current).toMatchObject({ status: 'uploading', updatedAt: 2_001 })
+
+    await expect(
+      updateClaimedJobStatus(
+        db,
+        { id: 'recovered_claim', status: 'posted', updatedAt: 2_100 },
+        { status: 'uploading', updatedAt: 1_000 },
+      ),
+    ).resolves.toBeNull()
+    await expect(getJob(db, 'recovered_claim')).resolves.toMatchObject({ status: 'uploading', updatedAt: 2_001 })
+  })
+
   it('updates job status fields without replacing source snapshot fields', async () => {
     await createOrGetJob(db, job({ id: 'job_update' }))
 
@@ -143,5 +305,52 @@ describe('job repository', () => {
       nextRetryAt: null,
       updatedAt: 2_000,
     })
+  })
+
+  it('transitions only the current uploading claim token to dispatching', async () => {
+    await createOrGetJob(db, job({ id: 'job_dispatch' }))
+    const claimed = await claimJobForPublish(db, 'job_dispatch', 2_000)
+    expect(claimed).toMatchObject({ status: 'uploading', updatedAt: 2_000 })
+
+    await expect(transitionClaimToDispatching(db, 'job_dispatch', 1_999, 2_001)).resolves.toBe(false)
+    await expect(getJob(db, 'job_dispatch', PUBKEY_A)).resolves.toMatchObject({
+      status: 'uploading',
+      updatedAt: 2_000,
+    })
+
+    await expect(transitionClaimToDispatching(db, 'job_dispatch', 2_000, 2_001)).resolves.toBe(true)
+    await expect(getJob(db, 'job_dispatch', PUBKEY_A)).resolves.toMatchObject({
+      status: 'dispatching',
+      updatedAt: 2_001,
+    })
+    await expect(transitionClaimToDispatching(db, 'job_dispatch', 2_000, 2_002)).resolves.toBe(false)
+  })
+
+  it('conditionally updates a claimed job only for the expected status and ownership token', async () => {
+    await createOrGetJob(db, job({ id: 'job_owned_update' }))
+    await claimJobForPublish(db, 'job_owned_update', 2_000)
+
+    await expect(
+      updateClaimedJobStatus(
+        db,
+        { id: 'job_owned_update', status: 'processing', updatedAt: 2_100, nextRetryAt: 2_160 },
+        { status: 'processing', updatedAt: 2_000 },
+      ),
+    ).resolves.toBeNull()
+    await expect(
+      updateClaimedJobStatus(
+        db,
+        { id: 'job_owned_update', status: 'processing', updatedAt: 2_100, nextRetryAt: 2_160 },
+        { status: 'uploading', updatedAt: 1_999 },
+      ),
+    ).resolves.toBeNull()
+
+    await expect(
+      updateClaimedJobStatus(
+        db,
+        { id: 'job_owned_update', status: 'processing', updatedAt: 2_100, nextRetryAt: 2_160 },
+        { status: 'uploading', updatedAt: 2_000 },
+      ),
+    ).resolves.toMatchObject({ status: 'processing', updatedAt: 2_100, nextRetryAt: 2_160 })
   })
 })

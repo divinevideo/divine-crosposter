@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { getEnabledAdapters, getProviderSummaries } from './registry'
+import { getAdapter, getEnabledAdapters, getProviderSummaries } from './registry'
 import type { Env } from '../types'
 
 function env(overrides: Partial<Env> = {}): Env {
@@ -54,5 +54,37 @@ describe('platform registry', () => {
         }),
       ),
     ).toContainEqual({ platform: 'tiktok', enabled: true, supportsAutomatic: true })
+  })
+
+  it('constructs only the requested adapter without validating unrelated app configuration', () => {
+    const adapter = getAdapter(
+      env({
+        KEYCAST_URL: '',
+        FUNNELCAKE_URL: '',
+        OAUTH_REDIRECT_BASE: '',
+        TOKEN_ENCRYPTION_KEY: '',
+        YOUTUBE_DEFAULT_PRIVACY_STATUS: 'friends',
+        ENABLE_X: 'true',
+        TWITTER_CLIENT_ID: 'x-client',
+        TWITTER_CLIENT_SECRET: 'x-secret',
+      }),
+      'x',
+    )
+
+    expect(adapter?.platform).toBe('x')
+  })
+
+  it('validates YouTube privacy only when constructing YouTube', () => {
+    expect(() =>
+      getAdapter(
+        env({
+          ENABLE_YOUTUBE: 'true',
+          GOOGLE_CLIENT_ID: 'google-client',
+          GOOGLE_CLIENT_SECRET: 'google-secret',
+          YOUTUBE_DEFAULT_PRIVACY_STATUS: 'friends',
+        }),
+        'youtube',
+      ),
+    ).toThrow()
   })
 })

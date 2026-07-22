@@ -3,6 +3,7 @@ export type PreferenceMode = 'manual' | 'automatic' | 'disabled'
 export type JobStatus =
   | 'queued'
   | 'uploading'
+  | 'dispatching'
   | 'processing'
   | 'posted'
   | 'failed'
@@ -20,10 +21,13 @@ export type ErrorCode =
   | 'not_owner'
   | 'not_eligible'
   | 'unknown_platform_error'
+  | 'ambiguous_post_result'
 
 export type Env = {
   DB: D1Database
   CROSSPOST_QUEUE: Queue<{ jobId: string }>
+  CROSSPOST_DLQ?: Queue<unknown>
+  OPS_ALERT_WEBHOOK_URL?: string
   KEYCAST_URL: string
   FUNNELCAKE_URL: string
   OAUTH_REDIRECT_BASE: string
@@ -53,6 +57,38 @@ export type OAuthStateRecord = {
   expiresAt: number
   metadataJson: string
 }
+
+export type OAuthAttemptStatus =
+  | 'started'
+  | 'provider_denied'
+  | 'callback_failed'
+  | 'token_exchange_failed'
+  | 'account_lookup_failed'
+  | 'storage_failed'
+  | 'connected'
+  | 'expired'
+
+export type OAuthAttemptFailureCode = Exclude<
+  OAuthAttemptStatus,
+  'started' | 'connected' | 'expired'
+>
+
+export type OAuthAttemptRecord = {
+  id: string
+  pubkey: string
+  platform: Platform
+  status: OAuthAttemptStatus
+  failureCode: OAuthAttemptFailureCode | null
+  providerStatus: number | null
+  createdAt: number
+  expiresAt: number
+  updatedAt: number
+}
+
+export type UpdateOAuthAttemptInput = Pick<
+  OAuthAttemptRecord,
+  'id' | 'status' | 'failureCode' | 'providerStatus' | 'updatedAt'
+>
 
 export type ConnectionStatus = 'connected' | 'needs_reauth' | 'disconnected'
 

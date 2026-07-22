@@ -6,6 +6,7 @@ import { platforms } from './routes/platforms'
 import { preferences } from './routes/preferences'
 import { processCrosspostJob, PublisherRetryError } from './services/publisher'
 import { runAutoCrosspostReconciliation } from './services/reconciler'
+import { runOperationalChecks } from './services/operations'
 import type { Env } from './types'
 
 const app = new Hono<{ Bindings: Env }>()
@@ -24,13 +25,13 @@ export default {
       try {
         const result = await processCrosspostJob(env, message.body.jobId)
         if (result.retryDelaySeconds) {
-          message.retry({ delaySeconds: result.retryDelaySeconds })
-        } else {
-          message.ack()
+          await env.CROSSPOST_QUEUE.send({ jobId: message.body.jobId }, { delaySeconds: result.retryDelaySeconds })
         }
+        message.ack()
       } catch (error) {
         if (error instanceof PublisherRetryError) {
-          message.retry({ delaySeconds: error.retryDelaySeconds })
+          await env.CROSSPOST_QUEUE.send({ jobId: message.body.jobId }, { delaySeconds: error.retryDelaySeconds })
+          message.ack()
         } else {
           throw error
         }
@@ -38,6 +39,20 @@ export default {
     }
   },
   async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
-    await runAutoCrosspostReconciliation(env)
+    const failures: unknown[] = []
+    try {
+      await runAutoCrosspostReconciliation(env)
+    } catch (error) {
+      failures.push(error)
+    }
+    try {
+      await runOperationalChecks(env, Math.floor(Date.now() / 1_000))
+    } catch (error) {
+      failures.push(error)
+    }
+    if (failures.length === 1) throw failures[0]
+    if (failures.length > 1) {
+      throw new AggregateError(failures, 'scheduled reconciliation and operational checks failed')
+    }
   },
 }

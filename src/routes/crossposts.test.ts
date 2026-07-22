@@ -112,17 +112,29 @@ describe('crosspost routes', () => {
       errorCode: 'rate_limited',
       errorMessage: 'slow down',
       providerStatus: 429,
-      providerResponseJson: '{"error":"rate_limit"}',
+      providerResponseJson:
+        '{"error":"rate_limit","token":"legacy-route-token-sentinel","nested":{"raw":"legacy-route-raw-sentinel"}}',
       createdAt: 2_000,
     })
 
     const res = await app.request('/jobs/job_existing', authenticatedInit(), testEnv(db, queueSend))
 
     expect(res.status).toBe(200)
-    await expect(res.json()).resolves.toEqual({
+    const body = await res.json<Record<string, unknown>>()
+    expect(body).toEqual({
       job: expect.objectContaining({ id: 'job_existing' }),
-      attempts: [expect.objectContaining({ id: 'attempt_1', errorCode: 'rate_limited' })],
+      attempts: [
+        expect.objectContaining({
+          id: 'attempt_1',
+          errorCode: 'rate_limited',
+          errorMessage: 'slow down',
+          providerStatus: 429,
+        }),
+      ],
     })
+    expect(body).not.toHaveProperty('attempts.0.providerResponseJson')
+    expect(JSON.stringify(body)).not.toContain('legacy-route-token-sentinel')
+    expect(JSON.stringify(body)).not.toContain('legacy-route-raw-sentinel')
   })
 
   it('maps non-owner crosspost attempts to a 403 JSON error', async () => {
