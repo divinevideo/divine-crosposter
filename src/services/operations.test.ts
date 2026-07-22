@@ -147,6 +147,18 @@ describe('operational checks', () => {
     await expect(runOperationalChecks(configured, 2_001)).resolves.toEqual([
       expect.objectContaining({ issue: 'notification_test' }),
     ])
+    const successfulBody = String(fetchMock.mock.calls[1][1]?.body)
+    expect(successfulBody).not.toContain('private-request-id')
+    expect(JSON.parse(successfulBody)).toEqual([
+      {
+        service: 'divine-crossposter',
+        observedAt: 2_001,
+        issue: 'notification_test',
+        backlogCount: 0,
+        backlogBytes: 0,
+        overdueJobCount: 0,
+      },
+    ])
     await expect(runOperationalChecks(configured, 2_002)).resolves.toEqual([])
   })
 

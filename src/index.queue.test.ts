@@ -9,6 +9,14 @@ import { encryptToken } from './utils/crypto'
 
 const KEY = '0123456789abcdef0123456789abcdef'
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
+
 function message(jobId: string) {
   const ack = vi.fn()
   const retry = vi.fn()
@@ -121,12 +129,29 @@ describe('queue delivery lifecycle', () => {
     await seedConnectedJob(db, 'instagram')
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({ error: { message: 'slow down' } }, { status: 429 })))
     const current = message('job_1')
+    const sendStarted = deferred<void>()
+    const releaseSend = deferred<void>()
+    const trace: string[] = []
+    send.mockImplementation(async () => {
+      trace.push('send-started')
+      sendStarted.resolve()
+      await releaseSend.promise
+      trace.push('send-resolved')
+    })
+    current.ack.mockImplementation(() => trace.push('ack'))
 
-    await worker.queue(batch(current.value), platformEnv(db, 'instagram', send), {} as ExecutionContext)
+    const delivery = worker.queue(batch(current.value), platformEnv(db, 'instagram', send), {} as ExecutionContext)
+    await sendStarted.promise
+
+    expect(current.ack).not.toHaveBeenCalled()
+    expect(current.retry).not.toHaveBeenCalled()
+    releaseSend.resolve()
+    await delivery
 
     expect(send).toHaveBeenCalledWith({ jobId: 'job_1' }, { delaySeconds: 60 })
     expect(current.ack).toHaveBeenCalledOnce()
     expect(current.retry).not.toHaveBeenCalled()
+    expect(trace).toEqual(['send-started', 'send-resolved', 'ack'])
   })
 
   it('lets a failed fresh send escape unacked for native retry and scheduled recovery', async () => {

@@ -68,6 +68,7 @@ describe('scheduled handler', () => {
   it('runs reconciliation, reads both queue metrics, and dispatches a DLQ alert', async () => {
     const db = await applyMigrations()
     const now = Math.floor(Date.now() / 1_000)
+    const trace: string[] = []
     await upsertConnection(db, connection({ id: 'conn_x', platform: 'x' }))
     await createOrGetJob(
       db,
@@ -80,10 +81,21 @@ describe('scheduled handler', () => {
         expiresAt: now + 10_000,
       }),
     )
-    const send = vi.fn().mockResolvedValue(undefined)
-    const primaryMetrics = vi.fn().mockResolvedValue({ backlogCount: 1, backlogBytes: 10 })
-    const dlqMetrics = vi.fn().mockResolvedValue({ backlogCount: 2, backlogBytes: 20 })
-    const fetchMock = vi.fn().mockResolvedValue(new Response())
+    const send = vi.fn().mockImplementation(async () => {
+      trace.push('reconciliation-enqueue')
+    })
+    const primaryMetrics = vi.fn().mockImplementation(async () => {
+      trace.push('primary-metrics')
+      return { backlogCount: 1, backlogBytes: 10 }
+    })
+    const dlqMetrics = vi.fn().mockImplementation(async () => {
+      trace.push('dlq-metrics')
+      return { backlogCount: 2, backlogBytes: 20 }
+    })
+    const fetchMock = vi.fn().mockImplementation(async () => {
+      trace.push('webhook')
+      return new Response()
+    })
     vi.stubGlobal('fetch', fetchMock)
     const configured = env({
       DB: db,
@@ -106,12 +118,29 @@ describe('scheduled handler', () => {
       expect.objectContaining({ method: 'POST' }),
     )
     expect(String(fetchMock.mock.calls[0][1]?.body)).toContain('dlq_nonempty')
+    expect(trace).toEqual(['reconciliation-enqueue', 'primary-metrics', 'dlq-metrics', 'webhook'])
   })
 
   it('consumes a one-shot notification only after metrics and webhook success', async () => {
     const db = await applyMigrations()
+    const now = Math.floor(Date.now() / 1_000)
+    await upsertConnection(db, connection({ id: 'conn_x', platform: 'x' }))
+    await createOrGetJob(
+      db,
+      job({
+        id: 'stale_x_notification_test',
+        platform: 'x',
+        connectionId: 'conn_x',
+        status: 'uploading',
+        updatedAt: now - 1_000,
+        expiresAt: now + 10_000,
+      }),
+    )
     await requestOperationsAlertTest(db, 'private-request-id', 1_000)
     const order: string[] = []
+    const send = vi.fn().mockImplementation(async () => {
+      order.push('reconciliation-enqueue')
+    })
     const primaryMetrics = vi.fn().mockImplementation(async () => {
       order.push('primary-metrics')
       return { backlogCount: 0, backlogBytes: 0 }
@@ -133,16 +162,25 @@ describe('scheduled handler', () => {
       {} as ScheduledEvent,
       env({
         DB: db,
-        CROSSPOST_QUEUE: { send: vi.fn(), metrics: primaryMetrics } as unknown as Queue<{ jobId: string }>,
+        CROSSPOST_QUEUE: { send, metrics: primaryMetrics } as unknown as Queue<{ jobId: string }>,
         CROSSPOST_DLQ: { metrics: dlqMetrics } as unknown as Queue<unknown>,
         OPS_ALERT_WEBHOOK_URL: 'https://alerts.example/private-hook',
       }),
       {} as ExecutionContext,
     )
 
-    expect(order).toEqual(['primary-metrics', 'dlq-metrics', 'webhook'])
-    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual([
-      expect.objectContaining({ issue: 'notification_test' }),
+    expect(order).toEqual(['reconciliation-enqueue', 'primary-metrics', 'dlq-metrics', 'webhook'])
+    const body = String(fetchMock.mock.calls[0][1]?.body)
+    expect(body).not.toContain('private-request-id')
+    expect(JSON.parse(body)).toEqual([
+      {
+        service: 'divine-crossposter',
+        observedAt: expect.any(Number),
+        issue: 'notification_test',
+        backlogCount: 0,
+        backlogBytes: 0,
+        overdueJobCount: 0,
+      },
     ])
     const consumed = await db
       .prepare('SELECT consumed_at FROM operations_alert_tests WHERE id = ?')
