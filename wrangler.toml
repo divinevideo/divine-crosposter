@@ -10,7 +10,9 @@ KEYCAST_URL = "https://login.divine.video"
 FUNNELCAKE_URL = "https://api.divine.video"
 OAUTH_REDIRECT_BASE = "https://crossposter.divine.video"
 ENABLE_INSTAGRAM = "true"
-INSTAGRAM_CLIENT_ID = "1337820474523664"
+# Instagram App ID from the Instagram business login product ("divine-IG"),
+# not the Facebook App ID — see docs/instagram-setup.md.
+INSTAGRAM_CLIENT_ID = "1495112838545237"
 ENABLE_TIKTOK = "false"
 ENABLE_X = "true"
 ENABLE_YOUTUBE = "false"
@@ -31,4 +33,4 @@ max_batch_size = 10
 max_batch_timeout = 30
 
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["* * * * *"]

@@ -256,7 +256,8 @@ export async function completeConnectionCallback(
 
     await setManualPreferenceAfterConnect(env.DB, state.pubkey, platform, connection.id, now)
     return redirectWithResult(state.returnUrl, platform, 'connected')
-  } catch {
+  } catch (error) {
+    console.error(`oauth callback failed for ${platform}`, error)
     return failureRedirect
   }
 }
