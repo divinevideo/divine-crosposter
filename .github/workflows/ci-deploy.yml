@@ -47,6 +47,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: production
 
     steps:
@@ -82,7 +83,10 @@ jobs:
             url="$1"
             pattern="$2"
             for attempt in $(seq 1 12); do
-              body="$(curl -fsS "$url" || true)"
+              body="$(curl --fail --silent --show-error \
+                --connect-timeout 5 --max-time 20 \
+                --retry 2 --retry-all-errors \
+                "$url" || true)"
               if printf '%s' "$body" | grep -Fq "$pattern"; then
                 return 0
               fi
@@ -94,16 +98,39 @@ jobs:
             exit 1
           }
 
+          check_platform_enabled() {
+            url="$1"
+            platform="$2"
+            for attempt in $(seq 1 12); do
+              body="$(curl --fail --silent --show-error \
+                --connect-timeout 5 --max-time 20 \
+                --retry 2 --retry-all-errors \
+                "$url" || true)"
+              if printf '%s' "$body" | jq -e \
+                --arg platform "$platform" \
+                '.platforms | any(.[]; .platform == $platform and .enabled == true)' \
+                >/dev/null 2>&1; then
+                return 0
+              fi
+              echo "Attempt $attempt failed for platform $platform"
+              sleep 10
+            done
+
+            echo "Timed out waiting for platform $platform to be enabled" >&2
+            exit 1
+          }
+
           check "https://crossposter.divine.video/health" '"ok":true'
           check "https://crossposter.divine.video/" 'Login with Divine'
           check "https://crossposter.divine.video/platforms" 'Provider status'
-          check "https://crossposter.divine.video/platforms?format=json" '"platform":"instagram","enabled":true'
-          check "https://crossposter.divine.video/platforms?format=json" '"platform":"x","enabled":true'
+          check_platform_enabled "https://crossposter.divine.video/platforms?format=json" instagram
+          check_platform_enabled "https://crossposter.divine.video/platforms?format=json" x
 
   notify:
     if: ${{ always() && (inputs.test_failure_notification == true || needs.test.result == 'failure' || needs.deploy.result == 'failure') }}
     needs: [test, deploy]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
       - name: Notify workflow failure
@@ -114,7 +141,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${OPS_ALERT_WEBHOOK_URL:-}" ]; then
-            exit 0
+            echo "::error::OPS_ALERT_WEBHOOK_URL is missing or inaccessible to this workflow"
+            exit 1
           fi
 
           event=workflow_failed
@@ -127,7 +155,9 @@ jobs:
             --arg event "$event" \
             --arg run_url "$RUN_URL" \
             '{service: $service, event: $event, runUrl: $run_url}')"
-          curl --fail --silent --show-error --retry 3 \
+          curl --fail --silent --show-error \
+            --connect-timeout 5 --max-time 30 \
+            --retry 3 --retry-all-errors \
             --header 'content-type: application/json' \
             --data-binary "$payload" \
             "$OPS_ALERT_WEBHOOK_URL"

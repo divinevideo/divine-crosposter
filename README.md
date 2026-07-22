@@ -211,21 +211,25 @@ Merges to `main` deploy automatically through GitHub Actions (`.github/workflows
 
 The deploy job enters the `production` GitHub environment. `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` may therefore be repository secrets, production-environment secrets, or selected-organization secrets that include this repository. Keep the API token limited to the Divine account and these permissions: Account Settings Read, Workers Scripts Edit, D1 Edit, Queues Edit, and Workers Routes Edit for the `divine.video` zone only.
 
-The separate `notify` job deliberately does not enter the production environment, so its `OPS_ALERT_WEBHOOK_URL` Actions secret must be a repository secret or a selected-organization secret. This is separate from installing the same secret name in the Worker with Wrangler. If the Actions webhook secret is absent, notification exits successfully without exposing anything.
+The separate `notify` job deliberately does not enter the production environment, so its `OPS_ALERT_WEBHOOK_URL` Actions secret must be a repository secret or a selected-organization secret. This is separate from installing the same secret name in the Worker with Wrangler. Because `notify` runs only for a workflow failure or an explicit notification test, a missing or inaccessible Actions webhook is itself reported as an error and fails the job. A failed pull request from a fork may therefore also fail `notify` when repository secrets are withheld; that visible failure is preferable to silently claiming notification succeeded.
 
 ### Safe production rollout
 
 Use the reviewed branch for the safety deployment, but let the merge-to-`main` CI run be the sole activation of `ENABLE_X=true`:
 
-1. Capture the current production Worker version and `origin/main` SHA in the private deployment checklist.
-2. Create `divine-crossposter-jobs-dlq` if absent, apply migrations, and install the Worker `OPS_ALERT_WEBHOOK_URL` interactively. Do not replace X credentials yet.
-3. Deploy the reviewed branch with `ENABLE_X=false`. Verify the deployed version has the D1 binding, primary queue, DLQ binding, scheduled cron, five native retries, and the named DLQ; verify the live platform JSON reports X disabled.
-4. Only after that safety version is healthy, replace `TWITTER_CLIENT_ID` and `TWITTER_CLIENT_SECRET` interactively from the one known matching X Developer Portal application. Do not print or compare secret values.
-5. Merge the reviewed branch. The normal CI deployment is the only step that restores the committed `ENABLE_X=true`, and its live smoke test must see X enabled.
+1. Before any production change, record `rollout_started_at` as a Unix epoch, the current production Worker version, and the `origin/main` SHA in the private deployment checklist. The timestamp makes later database evidence specific to this rollout.
+2. Create `divine-crossposter-jobs-dlq` if absent and apply migrations. Do not put any secret yet.
+3. Deploy the reviewed branch with `ENABLE_X=false`. Verify the deployed version has the D1 binding, primary queue, DLQ binding, scheduled cron, five native retries, and the named DLQ; require the live platform JSON to report X disabled.
+4. Only while that safety version is active, install the Worker `OPS_ALERT_WEBHOOK_URL` interactively, then require the live platform JSON to still report X disabled.
+5. Only then replace `TWITTER_CLIENT_ID` and `TWITTER_CLIENT_SECRET` interactively from the one known matching X Developer Portal application, and again require X to remain disabled. Each `wrangler secret put` creates and deploys a Worker version, which is why the verified X-disabled safety version must be active before the first secret change.
+6. Merge the reviewed branch. The normal CI deployment is the only step that restores the committed `ENABLE_X=true`, and its live smoke test must see X enabled.
 
 Useful commands for the operator-controlled steps are:
 
 ```bash
+rollout_started_at="$(date -u +%s)"
+printf 'rollout_started_at=%s\n' "$rollout_started_at"
+
 git fetch origin main
 git rev-parse origin/main
 npx wrangler deployments list --name divine-crossposter
@@ -234,12 +238,24 @@ npx wrangler d1 migrations list divine-crossposter --remote
 
 npx wrangler queues create divine-crossposter-jobs-dlq # only if absent
 npx wrangler d1 migrations apply divine-crossposter --remote
-npx wrangler secret put OPS_ALERT_WEBHOOK_URL
 npx wrangler deploy --var ENABLE_X:false --message "X recovery safety version"
+npx wrangler queues info divine-crossposter-jobs
+npx wrangler queues info divine-crossposter-jobs-dlq
+curl --fail --silent --show-error --connect-timeout 5 --max-time 20 --retry 2 --retry-all-errors \
+  'https://crossposter.divine.video/platforms?format=json' \
+  | jq -e '.platforms | any(.[]; .platform == "x" and .enabled == false)' >/dev/null
+
+npx wrangler secret put OPS_ALERT_WEBHOOK_URL
+curl --fail --silent --show-error --connect-timeout 5 --max-time 20 --retry 2 --retry-all-errors \
+  'https://crossposter.divine.video/platforms?format=json' \
+  | jq -e '.platforms | any(.[]; .platform == "x" and .enabled == false)' >/dev/null
 
 npx wrangler secret put TWITTER_CLIENT_ID
 npx wrangler secret put TWITTER_CLIENT_SECRET
 npx wrangler secret list
+curl --fail --silent --show-error --connect-timeout 5 --max-time 20 --retry 2 --retry-all-errors \
+  'https://crossposter.divine.video/platforms?format=json' \
+  | jq -e '.platforms | any(.[]; .platform == "x" and .enabled == false)' >/dev/null
 ```
 
 After the CI deployment, not before, inspect both queues. Require exactly one producer and one consumer on `divine-crossposter-jobs`, `max_retries = 5`, and `divine-crossposter-jobs-dlq` as its dead-letter queue. Require one watchdog/metrics producer and no consumer on the DLQ:
@@ -247,8 +263,11 @@ After the CI deployment, not before, inspect both queues. Require exactly one pr
 ```bash
 npx wrangler queues info divine-crossposter-jobs
 npx wrangler queues info divine-crossposter-jobs-dlq
-curl -fsS https://crossposter.divine.video/health
-curl -fsS 'https://crossposter.divine.video/platforms?format=json'
+curl --fail --silent --show-error --connect-timeout 5 --max-time 20 --retry 2 --retry-all-errors \
+  https://crossposter.divine.video/health | jq -e '.ok == true' >/dev/null
+curl --fail --silent --show-error --connect-timeout 5 --max-time 20 --retry 2 --retry-all-errors \
+  'https://crossposter.divine.video/platforms?format=json' \
+  | jq -e '.platforms | any(.[]; .platform == "x" and .enabled == true)' >/dev/null
 ```
 
 ### Real X authorization and manual post
@@ -290,25 +309,46 @@ A retry-scheduled `failed` job with a non-null `nextRetryAt` continues polling; 
 Verify production outcomes with count-only D1 queries:
 
 ```bash
+printf 'Recorded rollout start epoch: '
+read -r rollout_started_at
+case "$rollout_started_at" in
+  ''|*[!0-9]*) echo 'rollout_started_at must be a Unix epoch' >&2; exit 1 ;;
+esac
+
 npx wrangler d1 execute divine-crossposter --remote --json --command \
-  "SELECT status, COUNT(*) AS count FROM oauth_attempts WHERE platform = 'x' GROUP BY status;"
+  "SELECT COUNT(*) AS connected_x_oauth_attempts FROM oauth_attempts WHERE platform = 'x' AND status = 'connected' AND updated_at >= ${rollout_started_at};"
 npx wrangler d1 execute divine-crossposter --remote --json --command \
-  "SELECT COUNT(*) AS active_x_connections FROM connections WHERE platform = 'x' AND status = 'connected';"
+  "SELECT COUNT(*) AS active_x_connections FROM connections WHERE platform = 'x' AND status = 'connected' AND updated_at >= ${rollout_started_at};"
 npx wrangler d1 execute divine-crossposter --remote --json --command \
-  "SELECT COUNT(*) AS complete_posted_x_jobs FROM jobs WHERE platform = 'x' AND status = 'posted' AND length(external_post_id) > 0 AND external_post_url LIKE 'https://x.com/i/web/status/%';"
+  "SELECT COUNT(*) AS complete_posted_x_jobs FROM jobs WHERE platform = 'x' AND status = 'posted' AND created_at >= ${rollout_started_at} AND updated_at >= ${rollout_started_at} AND length(external_post_id) > 0 AND external_post_url LIKE 'https://x.com/i/web/status/%';"
 npx wrangler d1 execute divine-crossposter --remote --json --command \
-  "SELECT COUNT(*) AS unsafe_x_attempts FROM job_attempts a JOIN jobs j ON j.id = a.job_id WHERE j.platform = 'x' AND a.provider_response_json IS NOT NULL AND (a.status = 'posted' OR json_valid(a.provider_response_json) = 0 OR EXISTS (SELECT 1 FROM json_each(a.provider_response_json) WHERE key NOT IN ('mediaId', 'caption')));"
+  "SELECT COUNT(*) AS unsafe_x_attempts FROM job_attempts a JOIN jobs j ON j.id = a.job_id WHERE j.platform = 'x' AND a.created_at >= ${rollout_started_at} AND a.provider_response_json IS NOT NULL AND (a.status = 'posted' OR json_valid(a.provider_response_json) = 0 OR EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(a.provider_response_json) THEN a.provider_response_json ELSE '{}' END) WHERE key NOT IN ('mediaId', 'caption')));"
 ```
 
-Expect a connected X attempt, an active X connection, a complete posted X job, and zero unsafe X attempts. X processing checkpoints may contain only `mediaId` and `caption`; posted attempts must have a null `provider_response_json`. Never select identifying columns for this verification.
+Expect at least one connected X attempt updated during this rollout, an active X connection updated during this rollout, a complete X job created and posted during this rollout, and zero unsafe X attempts created during this rollout. X processing checkpoints may contain only `mediaId` and `caption`; invalid JSON is unsafe, and posted attempts must have a null `provider_response_json`. Never select identifying columns for this verification.
 
 ### Notification checks
 
 Test the GitHub notification without breaking a build or deploying:
 
 ```bash
-gh workflow run ci-deploy.yml -f test_failure_notification=true
-run_id="$(gh run list --workflow ci-deploy.yml --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId')"
+git fetch origin main
+expected_head_sha="$(git rev-parse origin/main)"
+dispatch_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+gh workflow run ci-deploy.yml --ref main -f test_failure_notification=true
+
+run_id=''
+for attempt in $(seq 1 30); do
+  candidates="$(gh run list --workflow ci-deploy.yml --event workflow_dispatch --limit 50 \
+    --json databaseId,createdAt,headSha)"
+  run_id="$(printf '%s' "$candidates" | jq -r \
+    --arg started "$dispatch_started_at" \
+    --arg sha "$expected_head_sha" \
+    '[.[] | select(.createdAt >= $started and .headSha == $sha)] | sort_by(.createdAt) | first | .databaseId // empty')"
+  [ -n "$run_id" ] && break
+  sleep 2
+done
+test -n "$run_id"
 gh run watch "$run_id" --exit-status
 ```
 
@@ -328,8 +368,11 @@ test -n "$safety_version_id"
 npx wrangler versions view "$safety_version_id" --name divine-crossposter
 npx wrangler rollback "$safety_version_id" --name divine-crossposter --message "Disable X after recovery incident" --yes
 
-curl -fsS https://crossposter.divine.video/health
-curl -fsS 'https://crossposter.divine.video/platforms?format=json'
+curl --fail --silent --show-error --connect-timeout 5 --max-time 20 --retry 2 --retry-all-errors \
+  https://crossposter.divine.video/health | jq -e '.ok == true' >/dev/null
+curl --fail --silent --show-error --connect-timeout 5 --max-time 20 --retry 2 --retry-all-errors \
+  'https://crossposter.divine.video/platforms?format=json' \
+  | jq -e '.platforms | any(.[]; .platform == "x" and .enabled == false)' >/dev/null
 npx wrangler queues info divine-crossposter-jobs
 npx wrangler queues info divine-crossposter-jobs-dlq
 ```
@@ -349,8 +392,10 @@ npm run deploy
 After deploy, check the live service:
 
 ```bash
-curl "https://crossposter.divine.video/health"
-curl "https://crossposter.divine.video/platforms?format=json"
+curl --fail --silent --show-error --connect-timeout 5 --max-time 20 --retry 2 --retry-all-errors \
+  "https://crossposter.divine.video/health"
+curl --fail --silent --show-error --connect-timeout 5 --max-time 20 --retry 2 --retry-all-errors \
+  "https://crossposter.divine.video/platforms?format=json"
 ```
 
 Use Cloudflare logs/tail when validating OAuth callbacks, queue processing, and scheduled reconciliation. Keep provider token material and OAuth callback query strings out of logs.
