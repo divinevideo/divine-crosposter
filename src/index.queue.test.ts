@@ -198,7 +198,8 @@ describe('queue delivery lifecycle', () => {
         .fn()
         .mockResolvedValueOnce(Response.json({ id: 'container-id' }))
         .mockResolvedValueOnce(Response.json({ status_code: 'FINISHED' }))
-        .mockResolvedValueOnce(Response.json({ id: 'post-id', permalink: 'https://instagram.example/post-id' })),
+        .mockResolvedValueOnce(Response.json({ id: 'post-id' }))
+        .mockResolvedValueOnce(Response.json({ permalink: 'https://instagram.example/post-id' })),
     )
     const current = message('job_1')
 

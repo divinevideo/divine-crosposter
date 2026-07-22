@@ -161,7 +161,8 @@ describe('publisher service', () => {
     fetchMock
       .mockResolvedValueOnce(Response.json({ id: 'container-id' }))
       .mockResolvedValueOnce(Response.json({ status_code: 'FINISHED' }))
-      .mockResolvedValueOnce(Response.json({ id: 'ig-post-id', permalink: 'https://instagram.example/reel' }))
+      .mockResolvedValueOnce(Response.json({ id: 'ig-post-id' }))
+      .mockResolvedValueOnce(Response.json({ permalink: 'https://instagram.example/reel' }))
 
     await expect(processCrosspostJob(platformEnv(db, 'instagram'), 'job_1', { now: 2_000 })).resolves.toEqual({
       status: 'posted',
@@ -565,6 +566,7 @@ describe('publisher service', () => {
     fetchMock
       .mockResolvedValueOnce(Response.json({ status_code: 'FINISHED' }))
       .mockResolvedValueOnce(Response.json({ id: 'ig-post-id' }))
+      .mockResolvedValueOnce(Response.json({ permalink: 'https://instagram.example/reel' }))
 
     await expect(processCrosspostJob(platformEnv(db, 'instagram'), 'job_1', { now: 2_000 })).resolves.toEqual({
       status: 'posted',
@@ -597,6 +599,7 @@ describe('publisher service', () => {
     fetchMock
       .mockResolvedValueOnce(Response.json({ status_code: 'FINISHED' }))
       .mockResolvedValueOnce(Response.json({ id: 'ig-post-id' }))
+      .mockResolvedValueOnce(Response.json({ permalink: 'https://instagram.example/reel' }))
 
     await expect(processCrosspostJob(platformEnv(db, 'instagram'), 'job_1', { now: 2_000 })).resolves.toEqual({
       status: 'posted',
@@ -615,6 +618,7 @@ describe('publisher service', () => {
       .mockResolvedValueOnce(Response.json({ id: 'container-id' }))
       .mockResolvedValueOnce(Response.json({ status_code: 'FINISHED' }))
       .mockResolvedValueOnce(Response.json({ id: 'ig-post-id' }))
+      .mockResolvedValueOnce(Response.json({ permalink: 'https://instagram.example/reel' }))
 
     const results = await Promise.all([
       processCrosspostJob(platformEnv(db, 'instagram'), 'job_1', { now: 2_000 }),
@@ -622,7 +626,7 @@ describe('publisher service', () => {
     ])
 
     expect(results).toContainEqual({ status: 'posted' })
-    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(fetchMock).toHaveBeenCalledTimes(4)
     await expect(listAttempts(db, 'job_1')).resolves.toHaveLength(1)
   })
 
