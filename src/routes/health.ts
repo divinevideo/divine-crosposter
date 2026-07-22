@@ -224,6 +224,23 @@ function renderHome(env: Env): string {
         align-items: start;
       }
 
+      .video-panel {
+        grid-column: 2;
+      }
+
+      .video-row {
+        grid-template-columns: auto 1fr auto;
+      }
+
+      .video-thumb {
+        width: 54px;
+        height: 96px;
+        object-fit: cover;
+        border-radius: 8px;
+        flex: none;
+        background: #e8e6e1;
+      }
+
       .flow-section {
         border-top: 1px solid var(--line);
         padding: 22px;
@@ -511,6 +528,10 @@ function renderHome(env: Env): string {
           grid-template-columns: 1fr;
         }
 
+        .video-panel {
+          grid-column: auto;
+        }
+
         .connect-row,
         .preference-row {
           grid-template-columns: 1fr;
@@ -616,7 +637,7 @@ function renderHome(env: Env): string {
             </div>
           </div>
 
-          <div class="panel">
+          <div class="panel video-panel">
             <div class="flow-section">
               <h2>Post a video now.</h2>
               <p>Your recent Divine videos. Send one to a connected platform whenever you like — same job either way, this is just the manual button.</p>
@@ -1141,7 +1162,11 @@ function renderHome(env: Env): string {
             return '<button class="mini-button" data-crosspost-video="' + escapeHtml(video.id) + '" data-crosspost-platform="' + escapeHtml(connection.platform) + '" ' + (busy ? 'disabled' : '') + '>' +
               (busy ? 'Sending…' : 'Post to ' + escapeHtml(platformName(connection.platform))) + '</button>';
           }).join(' ');
-          return '<div class="connect-row">' +
+          const thumb = typeof video.thumbnail === 'string' && video.thumbnail.startsWith('https://')
+            ? '<img class="video-thumb" src="' + escapeHtml(video.thumbnail) + '" alt="" loading="lazy">'
+            : '';
+          return '<div class="connect-row' + (thumb ? ' video-row' : '') + '">' +
+            thumb +
             '<span><strong>' + escapeHtml(title) + '</strong><small>' + escapeHtml(when) + '</small>' + statusLine + '</span>' +
             '<span>' + buttons + '</span>' +
           '</div>';
