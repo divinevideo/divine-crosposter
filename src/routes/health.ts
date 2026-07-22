@@ -262,19 +262,50 @@ function renderHome(env: Env): string {
         overflow-wrap: anywhere;
       }
 
-      .pubkey-box {
+      .account-box {
         display: none;
-        width: 100%;
+        align-items: center;
+        gap: 12px;
         margin-top: 14px;
-        padding: 12px;
-        border: 1px solid var(--line);
+        padding: 12px 14px;
+        border: 2px solid var(--dark);
         border-radius: 8px;
-        background: var(--paper);
-        color: var(--dark);
+        background: #fff;
+      }
+
+      .account-box img {
+        width: 44px;
+        height: 44px;
+        flex: 0 0 auto;
+        border: 2px solid var(--dark);
+        border-radius: 50%;
+        object-fit: cover;
+        background: var(--light);
+      }
+
+      .account-box strong {
+        display: block;
+        font-size: 17px;
+      }
+
+      .account-box small {
+        display: block;
+        margin-top: 2px;
+        color: var(--ink-soft);
         font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
         font-size: 12px;
-        line-height: 1.45;
         overflow-wrap: anywhere;
+      }
+
+      body.signed-in .hero-marketing,
+      body.signed-in .rails-panel {
+        display: none;
+      }
+
+      body.signed-in main {
+        grid-template-columns: 1fr;
+        align-items: start;
+        padding-top: 12px;
       }
 
       .connect-list {
@@ -333,6 +364,16 @@ function renderHome(env: Env): string {
         border: 1px solid var(--line);
         border-radius: 8px;
         padding: 14px;
+      }
+
+      .preference-row strong,
+      .preference-row small {
+        display: block;
+      }
+
+      .preference-row small {
+        margin-top: 4px;
+        color: var(--ink-soft);
       }
 
       select {
@@ -509,20 +550,28 @@ function renderHome(env: Env): string {
 
       <main>
         <section class="hero" aria-labelledby="headline">
-          <h1 id="headline">Send your loops farther.</h1>
-          <p>
-            Crossposter lets Divine creators choose where their original videos travel next:
-            Reels, TikTok, X, and Shorts. You connect the account. You choose manual or automatic.
-          </p>
+          <div class="hero-marketing">
+            <h1 id="headline">Send your loops farther.</h1>
+            <p>
+              Crossposter lets Divine creators choose where their original videos travel next:
+              Reels, TikTok, X, and Shorts. You connect the account. You choose manual or automatic.
+            </p>
+          </div>
           <div class="actions" aria-label="Service links">
             <button class="button primary" id="login-button" type="button">Login with Divine</button>
             <a class="button secondary" href="/platforms">Provider status</a>
           </div>
+          <div class="account-box" id="account-box">
+            <img id="account-avatar" alt="" hidden>
+            <span>
+              <strong id="account-name"></strong>
+              <small id="account-npub"></small>
+            </span>
+          </div>
           <div class="status-box" id="ui-status" role="status"></div>
-          <div class="pubkey-box" id="pubkey-box"></div>
         </section>
 
-        <aside class="panel" aria-label="Crossposting provider readiness">
+        <aside class="panel rails-panel" aria-label="Crossposting provider readiness">
           <div class="panel-head">
             <span>
               <strong>Publishing rails</strong>
@@ -561,8 +610,8 @@ function renderHome(env: Env): string {
 
           <div class="panel">
             <div class="flow-section">
-              <h2>Your posting switches.</h2>
-              <p>Manual means you press the button. Automatic only applies to future Divine videos.</p>
+              <h2>Crossposting settings.</h2>
+              <p>Per platform: Off posts nothing, Manual lets you send each video yourself, Automatic sends every future Divine video for you.</p>
               <div class="preference-list" id="preference-list"></div>
             </div>
           </div>
@@ -583,9 +632,11 @@ function renderHome(env: Env): string {
       const PKCE_KEY = 'divine_crossposter_pkce_v1';
       const STATE_KEY = 'divine_crossposter_state_v1';
       const RETURN_KEY = 'divine_crossposter_return_v1';
+      const PROFILE_RELAYS = ['wss://relay.divine.video', 'wss://purplepag.es', 'wss://relay.damus.io'];
       const platforms = JSON.parse(document.getElementById('platform-data').textContent || '[]');
       let session = null;
       let pubkey = null;
+      let profile = null;
       let connections = [];
       let preferences = [];
 
@@ -604,10 +655,124 @@ function renderHome(env: Env): string {
 
       function renderAuthControls() {
         const signedIn = !!session;
+        document.body.classList.toggle('signed-in', signedIn);
         for (const id of ['login-button', 'login-button-secondary']) {
           $(id)?.toggleAttribute('hidden', signedIn);
         }
         $('logout-button').toggleAttribute('hidden', !signedIn);
+      }
+
+      const BECH32_CHARS = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+
+      function bech32Polymod(values) {
+        const GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+        let chk = 1;
+        for (const value of values) {
+          const top = chk >> 25;
+          chk = ((chk & 0x1ffffff) << 5) ^ value;
+          for (let i = 0; i < 5; i++) {
+            if ((top >> i) & 1) chk ^= GEN[i];
+          }
+        }
+        return chk;
+      }
+
+      function npubEncode(hexPubkey) {
+        const bytes = [];
+        for (let i = 0; i < hexPubkey.length; i += 2) bytes.push(parseInt(hexPubkey.slice(i, i + 2), 16));
+        const words = [];
+        let acc = 0;
+        let bits = 0;
+        for (const byte of bytes) {
+          acc = (acc << 8) | byte;
+          bits += 8;
+          while (bits >= 5) {
+            bits -= 5;
+            words.push((acc >> bits) & 31);
+          }
+        }
+        if (bits > 0) words.push((acc << (5 - bits)) & 31);
+        const hrp = 'npub';
+        const expanded = [];
+        for (const char of hrp) expanded.push(char.charCodeAt(0) >> 5);
+        expanded.push(0);
+        for (const char of hrp) expanded.push(char.charCodeAt(0) & 31);
+        const poly = bech32Polymod(expanded.concat(words, [0, 0, 0, 0, 0, 0])) ^ 1;
+        const checksum = [];
+        for (let i = 0; i < 6; i++) checksum.push((poly >> (5 * (5 - i))) & 31);
+        let out = hrp + '1';
+        for (const word of words.concat(checksum)) out += BECH32_CHARS[word];
+        return out;
+      }
+
+      function fetchProfile(hexPubkey) {
+        return new Promise((resolve) => {
+          let best = null;
+          let openSockets = 0;
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            resolve(best);
+          };
+          const timer = setTimeout(finish, 4000);
+          for (const relayUrl of PROFILE_RELAYS) {
+            let ws;
+            try {
+              ws = new WebSocket(relayUrl);
+            } catch {
+              continue;
+            }
+            openSockets++;
+            ws.onopen = () => {
+              ws.send(JSON.stringify(['REQ', 'profile', { kinds: [0], authors: [hexPubkey], limit: 1 }]));
+            };
+            ws.onmessage = (msgEvent) => {
+              try {
+                const msg = JSON.parse(msgEvent.data);
+                if (msg[0] === 'EVENT' && msg[2] && msg[2].kind === 0) {
+                  if (!best || msg[2].created_at > best.created_at) best = msg[2];
+                }
+                if (msg[0] === 'EOSE') ws.close();
+              } catch {}
+            };
+            ws.onerror = () => {
+              try { ws.close(); } catch {}
+            };
+            ws.onclose = () => {
+              openSockets--;
+              if (openSockets <= 0) {
+                clearTimeout(timer);
+                finish();
+              }
+            };
+          }
+          if (openSockets === 0) {
+            clearTimeout(timer);
+            finish();
+          }
+        });
+      }
+
+      function renderAccount() {
+        const box = $('account-box');
+        if (!box) return;
+        if (!session || !pubkey) {
+          box.style.display = 'none';
+          return;
+        }
+        box.style.display = 'flex';
+        const npub = npubEncode(pubkey);
+        const shortNpub = npub.slice(0, 12) + '\\u2026' + npub.slice(-6);
+        const name = profile?.display_name || profile?.name || '';
+        $('account-name').textContent = name ? 'Signed in as ' + name : 'Signed in as ' + shortNpub;
+        const npubEl = $('account-npub');
+        npubEl.textContent = shortNpub;
+        npubEl.title = npub;
+        const avatar = $('account-avatar');
+        const picture = typeof profile?.picture === 'string' && /^https?:\\/\\//.test(profile.picture) ? profile.picture : '';
+        avatar.toggleAttribute('hidden', !picture);
+        if (picture) avatar.src = picture;
       }
 
       function escapeHtml(value) {
@@ -673,12 +838,12 @@ function renderHome(env: Env): string {
       function clearSession() {
         session = null;
         pubkey = null;
+        profile = null;
         connections = [];
         preferences = [];
         localStorage.removeItem(SESSION_KEY);
-        const box = $('pubkey-box');
-        if (box) box.style.display = 'none';
         renderAuthControls();
+        renderAccount();
         renderConnectRows();
         renderPreferenceRows();
       }
@@ -824,7 +989,7 @@ function renderHome(env: Env): string {
         const list = $('preference-list');
         if (!list) return;
         if (!session) {
-          list.innerHTML = '<div class="connect-row"><span><strong>Login first</strong><small>Your posting switches appear after Divine login.</small></span></div>';
+          list.innerHTML = '<div class="connect-row"><span><strong>Login first</strong><small>Crossposting settings appear after you sign in with Divine.</small></span></div>';
           return;
         }
         list.innerHTML = platforms.map((platform) => {
@@ -834,7 +999,7 @@ function renderHome(env: Env): string {
           const disabled = !connection;
           return '<div class="preference-row">' +
             '<span><strong>' + escapeHtml(platformName(platform.platform)) + '</strong><small>' +
-            (connection ? 'Choose how this platform gets future loops.' : 'Connect this platform before changing switches.') +
+            (connection ? 'How should new Divine videos reach this platform?' : 'Connect this platform first to turn on crossposting.') +
             '</small></span>' +
             '<select data-preference="' + escapeHtml(platform.platform) + '" ' + (disabled ? 'disabled' : '') + '>' +
               '<option value="disabled" ' + (current === 'disabled' ? 'selected' : '') + '>Off</option>' +
@@ -857,15 +1022,22 @@ function renderHome(env: Env): string {
         session = await getValidSession();
         renderAuthControls();
         if (!session) {
-          $('pubkey-box').style.display = 'none';
+          renderAccount();
           renderConnectRows();
           renderPreferenceRows();
           return;
         }
         pubkey = await keycastPublicKey();
-        const box = $('pubkey-box');
-        box.style.display = 'block';
-        box.textContent = 'Signed in pubkey: ' + pubkey;
+        renderAccount();
+        fetchProfile(pubkey).then((event) => {
+          if (!event) return;
+          try {
+            profile = JSON.parse(event.content);
+          } catch {
+            return;
+          }
+          renderAccount();
+        });
         const [connectionData, preferenceData] = await Promise.all([
           api('/connections'),
           api('/preferences'),
@@ -889,7 +1061,7 @@ function renderHome(env: Env): string {
           method: 'PUT',
           body: JSON.stringify({ mode }),
         });
-        setStatus(platformName(platform) + ' set to ' + mode + '.');
+        setStatus(platformName(platform) + ' crossposting set to ' + mode + '.');
         await refreshAccount();
       }
 
@@ -919,7 +1091,7 @@ function renderHome(env: Env): string {
         try {
           await updatePreference(target.dataset.preference, target.value);
         } catch (err) {
-          setStatus(err.message || 'Could not update posting switch.', 'error');
+          setStatus(err.message || 'Could not update crossposting setting.', 'error');
           await refreshAccount().catch(() => undefined);
         }
       });
