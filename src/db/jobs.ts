@@ -242,14 +242,55 @@ export async function listRunnableJobs(db: D1Database, now: number, limit: numbe
   const rows = await allPrepared<JobRow>(
     db,
     `SELECT * FROM jobs
-    WHERE status IN ('queued', 'failed')
+    WHERE (
+        (status IN ('queued', 'processing') AND (next_retry_at IS NULL OR next_retry_at <= ?))
+        OR (
+          status = 'failed'
+          AND next_retry_at IS NOT NULL
+          AND next_retry_at <= ?
+        )
+      )
       AND expires_at > ?
-      AND (next_retry_at IS NULL OR next_retry_at <= ?)
     ORDER BY COALESCE(next_retry_at, created_at) ASC, created_at ASC
     LIMIT ?`,
+    now,
     now,
     now,
     limit,
   )
   return rows.map(mapJob)
+}
+
+export async function recoverStaleXClaims(
+  db: D1Database,
+  now: number,
+  leaseSeconds: number,
+): Promise<{ uploadingRecovered: number; dispatchingFailed: number }> {
+  const staleBefore = now - leaseSeconds
+  const uploading = await runPrepared(
+    db,
+    `UPDATE jobs
+    SET status = 'failed',
+        error_code = 'unknown_platform_error',
+        error_message = 'stale X upload claim recovered before dispatch',
+        next_retry_at = ?,
+        updated_at = ?
+    WHERE platform = 'x' AND status = 'uploading' AND updated_at <= ?`,
+    now,
+    now,
+    staleBefore,
+  )
+  const dispatching = await runPrepared(
+    db,
+    `UPDATE jobs
+    SET status = 'failed',
+        error_code = 'ambiguous_post_result',
+        error_message = 'stale X dispatch requires manual reconciliation',
+        next_retry_at = NULL,
+        updated_at = ?
+    WHERE platform = 'x' AND status = 'dispatching' AND updated_at <= ?`,
+    now,
+    staleBefore,
+  )
+  return { uploadingRecovered: changes(uploading), dispatchingFailed: changes(dispatching) }
 }

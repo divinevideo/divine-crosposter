@@ -20,8 +20,8 @@ Crossposter is a single Worker with four entry points wired together in `src/ind
 
 - **HTTP API and UI** — Hono routes for the setup UI, health, provider readiness, OAuth connections, preferences, crosspost creation, and job reads.
 - **Platform adapters** — one adapter per platform (`src/platforms/instagram.ts`, `tiktok.ts`, `x.ts`, `youtube.ts`) behind a shared adapter interface and a registry that reports which providers are configured.
-- **Queue consumer** — consumes `{ "jobId": "..." }` messages from `CROSSPOST_QUEUE`, refreshes tokens when needed, calls the platform adapter, records an attempt, and updates job state. Transient failures are retried with a service-selected backoff delay.
-- **Scheduled reconciler** — a Cron Trigger that backs up automatic mode. Divine web/mobile should push a newly published event to this service after a successful publish; the reconciler catches missed client callbacks by polling Funnelcake for recent eligible videos and creating the same idempotent jobs.
+- **Queue consumer** — consumes `{ "jobId": "..." }` messages from `CROSSPOST_QUEUE`, refreshes tokens when needed, calls the platform adapter, records an attempt, and updates job state. Controlled application retries are fresh delayed messages; the current delivery is acknowledged only after that send succeeds.
+- **Scheduled reconciler and watchdog** — a Cron Trigger backs up automatic mode, recovers stale claims, re-enqueues due D1 jobs, and checks both the primary queue and dead-letter queue (DLQ). Divine web/mobile should still push a newly published event after a successful publish.
 
 D1 is the source of truth for connection state, preferences, idempotent job creation, retry state, and an append-only attempt history. The Worker does not transcode video; if a platform needs media normalization later, that belongs in a separate service.
 
@@ -63,6 +63,7 @@ Create the backing infrastructure once per environment:
 ```bash
 npx wrangler d1 create divine-crossposter
 npx wrangler queues create divine-crossposter-jobs
+npx wrangler queues create divine-crossposter-jobs-dlq
 ```
 
 Copy the returned D1 `database_id` into `wrangler.toml`, then apply migrations locally or remotely:
@@ -84,8 +85,9 @@ The Worker is deployed as `divine-crossposter` on the `crossposter.divine.video`
 | --- | --- | --- |
 | `DB` | D1 database | Service-owned state (`divine-crossposter`). |
 | `CROSSPOST_QUEUE` | Queue producer | Enqueues publish jobs onto `divine-crossposter-jobs`. |
+| `CROSSPOST_DLQ` | Queue producer/metrics binding | Reads aggregate backlog metrics for `divine-crossposter-jobs-dlq`. |
 
-The same Worker is the queue consumer, configured with `max_batch_size = 10` and `max_batch_timeout = 30`. The reconciler cron runs `*/5 * * * *`.
+The same Worker is the queue consumer, configured with `max_batch_size = 10`, `max_batch_timeout = 30`, five native retries, and `divine-crossposter-jobs-dlq` as its dead-letter queue. The reconciler/watchdog cron runs `*/5 * * * *`.
 
 ### Variables
 
@@ -113,6 +115,7 @@ npx wrangler secret put GOOGLE_CLIENT_ID
 npx wrangler secret put GOOGLE_CLIENT_SECRET
 npx wrangler secret put TIKTOK_CLIENT_KEY
 npx wrangler secret put TIKTOK_CLIENT_SECRET
+npx wrangler secret put OPS_ALERT_WEBHOOK_URL
 ```
 
 `TOKEN_ENCRYPTION_KEY` must be at least 32 characters. It encrypts provider access and refresh tokens before they are stored in D1. Do not log OAuth codes, callback URLs containing codes, access tokens, refresh tokens, client secrets, or decrypted token values.
@@ -166,13 +169,32 @@ Clients see connection summaries, preferences, job summaries, normalized statuse
 
 ## Job lifecycle
 
-Job statuses: `queued`, `uploading`, `processing`, `posted`, `failed`, `needs_reauth`, `skipped`.
+Job statuses: `queued`, `uploading`, `dispatching`, `processing`, `posted`, `failed`, `needs_reauth`, `skipped`.
 
-Normalized error codes: `rate_limited`, `needs_reauth`, `media_rejected`, `platform_review_required`, `processing_timeout`, `expired`, `not_connected`, `not_owner`, `not_eligible`, `unknown_platform_error`.
+Normalized error codes: `rate_limited`, `needs_reauth`, `media_rejected`, `platform_review_required`, `processing_timeout`, `expired`, `not_connected`, `not_owner`, `not_eligible`, `unknown_platform_error`, `ambiguous_post_result`.
 
-- Transient failures (rate limits, unknown platform errors, processing timeouts) use exponential backoff via Cloudflare Queues retries. Permanent failures (revoked auth, missing publish permission, unsupported media, disabled provider) are not retried forever, and unposted jobs eventually expire to `skipped` rather than surprise-posting later.
+- Transient provider failures and processing polls use bounded application backoff: Crossposter sends a fresh delayed queue message, then acknowledges the current delivery. `message.retry()` is not used. Only unexpected infrastructure failures or a failed fresh-message send remain unacknowledged; Cloudflare retries those deliveries at most five times before moving them to the DLQ.
+- Scheduled reconciliation recovers stale X `uploading` claims as retryable pre-dispatch failures and re-enqueues them. A stale X `dispatching` claim has an unknown external outcome, so it becomes terminal `ambiguous_post_result` and requires manual reconciliation; it is never automatically reposted.
 - If token refresh or publishing returns an auth failure, the connection and job are marked `needs_reauth`; automatic jobs for that platform stop until the user reconnects. Manual retry after reconnect reuses the existing job where possible and preserves attempt history.
 - Disconnecting relies on local D1 state to stop future Divine-initiated crossposts. Provider revocation, where supported, is called best-effort; a failed revocation does not keep local crossposting enabled.
+
+## Queue operations and alerts
+
+The watchdog alerts on two independent signals: a nonempty DLQ and D1 jobs that have been runnable for at least 15 minutes. Primary queue `oldestMessageTimestamp` is deliberately not an alert threshold because delayed retry messages can be old while their D1 `next_retry_at` is still in the future. Alert payloads contain only `service`, `observedAt`, `issue`, `backlogCount`, `backlogBytes`, and `overdueJobCount`; they never include job IDs, URLs, tokens, pubkeys, provider responses, callback state, or verifier material.
+
+Inspect DLQ messages and the corresponding aggregate D1 state before deciding how to recover them. Do not purge the DLQ as a routine response: determine whether the failure is infrastructure-only, confirm the job's current status and external posting outcome, and re-enqueue only when that outcome is safe and known.
+
+To test the production notification path once, insert a uniquely named request into D1, wait for the next scheduled run and webhook receipt, then confirm `consumed_at` was set:
+
+```bash
+npx wrangler d1 execute divine-crossposter --remote --command \
+  "INSERT INTO operations_alert_tests (id, requested_at, consumed_at) VALUES ('ops-alert-test-2026-07-22T120000Z', unixepoch(), NULL)"
+
+npx wrangler d1 execute divine-crossposter --remote --command \
+  "SELECT id, requested_at, consumed_at FROM operations_alert_tests WHERE id = 'ops-alert-test-2026-07-22T120000Z'"
+```
+
+The request stays unconsumed if either queue metrics lookup fails, the webhook secret is absent, or the webhook returns a non-2xx response. A successful receipt consumes only the oldest pending test request, after the webhook returns 2xx. The request ID is never included in the alert or logs.
 
 ## Deployment
 

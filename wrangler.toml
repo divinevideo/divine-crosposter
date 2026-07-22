@@ -25,10 +25,16 @@ migrations_dir = "migrations"
 binding = "CROSSPOST_QUEUE"
 queue = "divine-crossposter-jobs"
 
+[[queues.producers]]
+binding = "CROSSPOST_DLQ"
+queue = "divine-crossposter-jobs-dlq"
+
 [[queues.consumers]]
 queue = "divine-crossposter-jobs"
 max_batch_size = 10
 max_batch_timeout = 30
+max_retries = 5
+dead_letter_queue = "divine-crossposter-jobs-dlq"
 
 [triggers]
 crons = ["*/5 * * * *"]

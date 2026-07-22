@@ -119,6 +119,8 @@ describe('automatic crosspost reconciler', () => {
       queuedJobsEnqueued: 0,
       oauthAttemptsExpired: 0,
       oauthStatesDeleted: 0,
+      uploadingRecovered: 0,
+      dispatchingFailed: 0,
     })
     expect(fetchMock).not.toHaveBeenCalled()
   })
@@ -223,5 +225,34 @@ describe('automatic crosspost reconciler', () => {
 
     expect(result).toMatchObject({ queuedJobsEnqueued: 1 })
     expect(queueSend).toHaveBeenCalledWith({ jobId: 'job_stranded' })
+  })
+
+  it('recovers stale X claims before enqueueing and never requeues ambiguous dispatches', async () => {
+    await upsertConnection(db, connection({ id: 'conn_x', platform: 'x' }))
+    await createOrGetJob(
+      db,
+      job({ id: 'stale_upload', platform: 'x', connectionId: 'conn_x', status: 'uploading', updatedAt: 2_699 }),
+    )
+    await createOrGetJob(
+      db,
+      job({
+        id: 'stale_dispatch',
+        videoEventId: VIDEO_EVENT_ID_2,
+        externalAccountId: 'second-account',
+        platform: 'x',
+        connectionId: 'conn_x',
+        status: 'dispatching',
+        updatedAt: 2_699,
+      }),
+    )
+
+    const result = await runAutoCrosspostReconciliation(env(db, queueSend), { now: 3_000 })
+
+    expect(result).toMatchObject({ uploadingRecovered: 1, dispatchingFailed: 1, queuedJobsEnqueued: 1 })
+    expect(queueSend).toHaveBeenCalledTimes(1)
+    expect(queueSend).toHaveBeenCalledWith({ jobId: 'stale_upload' })
+    await expect(listJobsForVideo(db, PUBKEY_A, VIDEO_EVENT_ID_2)).resolves.toEqual([
+      expect.objectContaining({ status: 'failed', errorCode: 'ambiguous_post_result', nextRetryAt: null }),
+    ])
   })
 })

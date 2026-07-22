@@ -437,7 +437,7 @@ async function handleProcessingProviderError(
     await addAttempt(env, {
       jobId: job.id,
       platform: job.platform,
-      status: 'processing',
+      status: 'failed',
       errorCode: error.code,
       errorMessage: error.message,
       providerStatus: error.providerStatus ?? null,

@@ -704,6 +704,9 @@ describe('publisher service', () => {
       errorCode: 'processing_timeout',
       nextRetryAt: 2_060,
     })
+    await expect(listAttempts(db, 'job_1')).resolves.toEqual([
+      expect.objectContaining({ status: 'processing', errorCode: 'rate_limited' }),
+    ])
 
     fetchMock.mockResolvedValueOnce(
       Response.json({ data: { status: 'PUBLISH_COMPLETE', publish_id: 'publish-id' }, error: { code: 'ok' } }),
@@ -714,6 +717,29 @@ describe('publisher service', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2)
     expect(String(fetchMock.mock.calls[1][0])).toBe('https://open.tiktokapis.com/v2/post/publish/status/fetch/')
+  })
+
+  it('records a terminal polling provider error attempt as failed', async () => {
+    await seedConnectedJob(db, 'x', {
+      status: 'processing',
+      externalPostId: 'media-id',
+      nextRetryAt: 2_000,
+    })
+    fetchMock.mockResolvedValueOnce(
+      Response.json({ data: { id: 'media-id', processing_info: { state: 'failed' } } }),
+    )
+
+    await expect(processCrosspostJob(platformEnv(db, 'x'), 'job_1', { now: 2_000 })).resolves.toEqual({
+      status: 'failed',
+    })
+    await expect(getJob(db, 'job_1', PUBKEY_A)).resolves.toMatchObject({
+      status: 'failed',
+      errorCode: 'media_rejected',
+      nextRetryAt: null,
+    })
+    await expect(listAttempts(db, 'job_1')).resolves.toEqual([
+      expect.objectContaining({ status: 'failed', errorCode: 'media_rejected' }),
+    ])
   })
 
   it('sanitizes refreshed token metadata before storing connection metadata', async () => {
